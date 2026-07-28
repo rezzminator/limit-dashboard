@@ -9,6 +9,7 @@ enum AccountState: String, Sendable {
     case loading
     case live
     case cached
+    case staleCache
     case unavailable
 
     var title: String {
@@ -16,6 +17,7 @@ enum AccountState: String, Sendable {
         case .loading: "Refreshing"
         case .live: "Live"
         case .cached: "Cached"
+        case .staleCache: "Stale cache"
         case .unavailable: "Unavailable"
         }
     }
@@ -36,7 +38,7 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
     let title: String
     let localLabel: String
     let configuredEmail: String?
-    let profileDirectory: String?
+    let claudeStatePath: String?
     let position: Int
 
     static let configured: [AccountSlot] = [
@@ -44,27 +46,27 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
             id: "claude-gmail",
             provider: .claude,
             title: "Claude",
-            localLabel: "gmail",
+            localLabel: "account 1",
             configuredEmail: "mrez9090@gmail.com",
-            profileDirectory: ".claude",
+            claudeStatePath: ".claude.json",
             position: 0
         ),
         AccountSlot(
             id: "claude-freudche",
             provider: .claude,
             title: "Claude",
-            localLabel: "freudche",
-            configuredEmail: "reza@freudche.com",
-            profileDirectory: ".claude2",
+            localLabel: "account 2",
+            configuredEmail: "reza.khosravivala@gmail.com",
+            claudeStatePath: ".claude2/.claude.json",
             position: 1
         ),
         AccountSlot(
             id: "claude-khosravi",
             provider: .claude,
             title: "Claude",
-            localLabel: "khosravi",
-            configuredEmail: "reza.khosravivala@gmail.com",
-            profileDirectory: ".claude3",
+            localLabel: "account 3",
+            configuredEmail: "reza@intuita.health",
+            claudeStatePath: ".claude3/.claude.json",
             position: 2
         ),
         AccountSlot(
@@ -73,7 +75,7 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
             title: "Codex",
             localLabel: "primary",
             configuredEmail: nil,
-            profileDirectory: nil,
+            claudeStatePath: nil,
             position: 3
         )
     ]
@@ -85,31 +87,21 @@ struct UsageWindow: Identifiable, Hashable, Sendable {
     let usedPercent: Double
     let resetAt: Date?
 
+    var normalizedUsedPercent: Double {
+        max(0, min(100, usedPercent))
+    }
+
     var remainingPercent: Double {
-        max(0, min(100, 100 - usedPercent))
-    }
-}
-
-enum ExtraUsageState: Equatable, Sendable {
-    case available
-    case disabled
-    case unavailable
-}
-
-struct ExtraUsageInfo: Sendable {
-    let state: ExtraUsageState
-    let usedPercent: Double?
-    let status: String
-
-    var remainingPercent: Double? {
-        usedPercent.map { max(0, min(100, 100 - $0)) }
+        100 - normalizedUsedPercent
     }
 
-    static let unavailable = ExtraUsageInfo(
-        state: .unavailable,
-        usedPercent: nil,
-        status: "Unavailable in local cache"
-    )
+    var usedLabel: String {
+        "\(Int(normalizedUsedPercent.rounded()))% used"
+    }
+
+    var remainingLabel: String {
+        "\(Int(remainingPercent.rounded()))% remaining"
+    }
 }
 
 struct AccountSnapshot: Identifiable, Sendable {
@@ -119,7 +111,7 @@ struct AccountSnapshot: Identifiable, Sendable {
     var plan: String
     var state: AccountState
     var windows: [UsageWindow]
-    var extraUsage: ExtraUsageInfo?
+    var fableUsage: UsageWindow?
     var providerAccountID: String?
     var detail: String?
     var refreshedAt: Date?
@@ -133,7 +125,7 @@ struct AccountSnapshot: Identifiable, Sendable {
             plan: "Checking",
             state: .loading,
             windows: [],
-            extraUsage: nil,
+            fableUsage: nil,
             providerAccountID: nil,
             detail: nil,
             refreshedAt: nil,
@@ -154,7 +146,28 @@ struct AccountSnapshot: Identifiable, Sendable {
             plan: plan,
             state: .unavailable,
             windows: [],
-            extraUsage: slot.provider == .claude ? .unavailable : nil,
+            fableUsage: nil,
+            providerAccountID: nil,
+            detail: detail,
+            refreshedAt: Date(),
+            duplicatePeer: nil
+        )
+    }
+
+    static func staleCache(
+        _ slot: AccountSlot,
+        identity: String,
+        plan: String,
+        detail: String
+    ) -> AccountSnapshot {
+        AccountSnapshot(
+            id: slot.id,
+            slot: slot,
+            identity: identity,
+            plan: plan,
+            state: .staleCache,
+            windows: [],
+            fableUsage: nil,
             providerAccountID: nil,
             detail: detail,
             refreshedAt: Date(),

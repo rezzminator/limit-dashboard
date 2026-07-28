@@ -25,6 +25,42 @@ final class LimitDashboardTests: XCTestCase {
         )
     }
 
+    func testObservedSeventyThreePercentUsageIsNotDisplayedAsThirtyPercent() {
+        let observed = UsageWindow(
+            id: "seven-day",
+            title: "7-day",
+            usedPercent: 73,
+            resetAt: nil
+        )
+        XCTAssertEqual(observed.usedLabel, "73% used")
+        XCTAssertEqual(observed.remainingLabel, "27% remaining")
+        XCTAssertEqual(observed.normalizedUsedPercent, 73)
+    }
+
+    func testCanonicalClaudeStateRegistryUsesTheRootFileForAccountOne() {
+        let claude = AccountSlot.configured.filter { $0.provider == .claude }
+        XCTAssertEqual(
+            claude.map(\.claudeStatePath),
+            [".claude.json", ".claude2/.claude.json", ".claude3/.claude.json"]
+        )
+    }
+
+    func testMismatchedCachedAccountIsRejected() {
+        let store = CredentialStore()
+        XCTAssertFalse(
+            store.cacheMatchesClaudeIdentity(
+                root: ["oauthAccount": ["accountUuid": "account-a"]],
+                cached: ["accountUuid": "account-b"]
+            )
+        )
+        XCTAssertTrue(
+            store.cacheMatchesClaudeIdentity(
+                root: ["oauthAccount": ["accountUuid": "account-a"]],
+                cached: ["accountUuid": "account-a"]
+            )
+        )
+    }
+
     func testRefreshIntervalValidationAndDefault() {
         XCTAssertEqual(RefreshPolicy.defaultSeconds, 20)
         XCTAssertEqual(RefreshPolicy.validated(-100), 10)
@@ -32,20 +68,42 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(RefreshPolicy.validated(99_999), 3_600)
     }
 
-    func testCachedClaudeExtraUsageDoesNotInventAValue() throws {
-        let extra = CredentialStore().extraUsageInfo(
+    func testCachedClaudeFableUsageReadsExactWeeklyScopedEntry() throws {
+        let fable = CredentialStore().fableUsageWindow(
             from: [
-                "extra_usage": [
-                    "is_enabled": false,
-                    "monthly_limit": NSNull(),
-                    "used_credits": NSNull(),
-                    "utilization": NSNull()
-                ]
+                "limits": [[
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 24,
+                    "resets_at": "2026-08-01T03:00:00.299633+00:00",
+                    "scope": ["model": ["id": NSNull(), "display_name": "Fable"]],
+                    "is_active": false
+                ]]
             ]
         )
-        XCTAssertEqual(extra.state, .disabled)
-        XCTAssertNil(extra.usedPercent)
-        XCTAssertEqual(extra.status, "Not enabled")
+        XCTAssertEqual(fable?.title, "Fable usage")
+        XCTAssertEqual(fable?.usedPercent, 24)
+        XCTAssertEqual(fable?.remainingPercent, 76)
+        XCTAssertNotNil(fable?.resetAt)
+    }
+
+    func testCachedClaudeFableUsageDoesNotInventAValue() {
+        XCTAssertNil(
+            CredentialStore().fableUsageWindow(
+                from: [
+                    "limits": [[
+                        "kind": "weekly_scoped",
+                        "percent": NSNull(),
+                        "scope": ["model": ["display_name": "Fable"]]
+                    ]]
+                ]
+            )
+        )
+        XCTAssertNil(
+            CredentialStore().fableUsageWindow(
+                from: ["extra_usage": ["is_enabled": true, "utilization": 42]]
+            )
+        )
     }
 
     func testLocalCodexCredentialIsReadableWithoutExposingValues() throws {

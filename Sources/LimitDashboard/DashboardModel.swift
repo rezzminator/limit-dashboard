@@ -14,18 +14,23 @@ final class DashboardModel: ObservableObject {
 
     var issueCount: Int {
         let unavailable = snapshots.filter { $0.state == .unavailable }.count
+        let stale = snapshots.filter { $0.state == .staleCache }.count
         let hasDuplicateGroup = snapshots.contains { $0.duplicatePeer != nil }
-        return unavailable + (hasDuplicateGroup ? 1 : 0)
+        return unavailable + stale + (hasDuplicateGroup ? 1 : 0)
     }
 
     var issueSummary: String? {
         let unavailable = snapshots.filter { $0.state == .unavailable }.count
+        let stale = snapshots.filter { $0.state == .staleCache }.count
         let duplicates = snapshots.filter { $0.duplicatePeer != nil }.count
-        if unavailable == 0, duplicates == 0 { return nil }
+        if unavailable == 0, stale == 0, duplicates == 0 { return nil }
 
         var parts: [String] = []
         if unavailable > 0 {
             parts.append("\(unavailable) account\(unavailable == 1 ? "" : "s") unavailable")
+        }
+        if stale > 0 {
+            parts.append("\(stale) quota cache\(stale == 1 ? "" : "s") needs refresh")
         }
         if duplicates > 0 {
             parts.append("duplicate Claude session detected")

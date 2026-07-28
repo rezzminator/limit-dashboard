@@ -269,11 +269,14 @@ private struct AccountCard: View {
     private func usageContent(_ headline: UsageWindow) -> some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("\(Int(headline.remainingPercent.rounded()))%")
+                Text("\(Int(headline.normalizedUsedPercent.rounded()))%")
                     .font(.system(size: 38, weight: .bold, design: .rounded))
                     .contentTransition(.numericText())
-                Text("remaining")
+                Text("used")
                     .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("· \(headline.remainingLabel)")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
                 if let resetAt = headline.resetAt {
@@ -293,7 +296,7 @@ private struct AccountCard: View {
                 LimitRow(window: window, accent: accent)
             }
             if snapshot.slot.provider == .claude {
-                ExtraUsageRow(info: snapshot.extraUsage ?? .unavailable, accent: accent)
+                FableUsageRow(window: snapshot.fableUsage, accent: accent)
             }
 
             Spacer(minLength: 0)
@@ -334,14 +337,16 @@ private struct AccountCard: View {
             Image(systemName: "person.crop.circle.badge.exclamationmark")
                 .font(.system(size: 28, weight: .medium))
                 .foregroundStyle(.orange)
-            Text("Session needs attention")
+            Text(snapshot.state == .staleCache
+                 ? "Waiting for matching quota cache"
+                 : "Session needs attention")
                 .font(.system(size: 17, weight: .bold, design: .rounded))
             Text(snapshot.detail ?? "This account could not be refreshed.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if snapshot.slot.provider == .claude {
-                ExtraUsageRow(info: snapshot.extraUsage ?? .unavailable, accent: accent)
+                FableUsageRow(window: snapshot.fableUsage, accent: accent)
             }
             Spacer()
             Text(snapshot.slot.provider == .claude
@@ -444,6 +449,7 @@ private struct StateBadge: View {
         switch state {
         case .live: .green
         case .cached: .orange
+        case .staleCache: .orange
         case .loading: .blue
         case .unavailable: .red
         }
@@ -475,7 +481,7 @@ private struct LimitRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(Int(window.remainingPercent.rounded()))% left")
+                Text("\(window.usedLabel) · \(window.remainingLabel)")
                     .font(.system(size: 11, weight: .bold, design: .rounded))
             }
             GeometryReader { proxy in
@@ -490,7 +496,7 @@ private struct LimitRow: View {
                                 endPoint: .trailing
                             )
                         )
-                        .frame(width: proxy.size.width * window.remainingPercent / 100)
+                        .frame(width: proxy.size.width * window.normalizedUsedPercent / 100)
                 }
             }
             .frame(height: 7)
@@ -498,33 +504,26 @@ private struct LimitRow: View {
     }
 }
 
-private struct ExtraUsageRow: View {
-    let info: ExtraUsageInfo
+private struct FableUsageRow: View {
+    let window: UsageWindow?
     let accent: Color
-
-    private var statusColor: Color {
-        switch info.state {
-        case .available: accent
-        case .disabled: .secondary
-        case .unavailable: .orange
-        }
-    }
 
     var body: some View {
         VStack(spacing: 7) {
             HStack(spacing: 7) {
-                Image(systemName: "creditcard.fill")
-                    .foregroundStyle(statusColor)
-                Text("Extra usage")
+                Image(systemName: "wand.and.stars")
+                    .foregroundStyle(window == nil ? .orange : accent)
+                Text("Fable usage")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(info.status)
+                Text(window.map { "\($0.usedLabel) · \($0.remainingLabel)" }
+                     ?? "Unavailable in local cache")
                     .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(statusColor)
+                    .foregroundStyle(window == nil ? .orange : .primary)
             }
 
-            if let remaining = info.remainingPercent {
+            if let window {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
                         Capsule()
@@ -537,18 +536,42 @@ private struct ExtraUsageRow: View {
                                     endPoint: .trailing
                                 )
                             )
-                            .frame(width: proxy.size.width * remaining / 100)
+                            .frame(width: proxy.size.width * window.normalizedUsedPercent / 100)
                     }
                 }
                 .frame(height: 7)
+
+                HStack {
+                    Text("Weekly model limit")
+                    Spacer()
+                    if let resetAt = window.resetAt {
+                        Text("resets \(compactReset(resetAt))")
+                    }
+                }
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(
-            statusColor.opacity(0.08),
+            (window == nil ? Color.orange : accent).opacity(0.08),
             in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
+    }
+
+    private func compactReset(_ date: Date) -> String {
+        let totalMinutes = max(0, Int(date.timeIntervalSinceNow / 60))
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 {
+            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
+        }
+        if hours > 0 {
+            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+        }
+        return "\(minutes)m"
     }
 }
 

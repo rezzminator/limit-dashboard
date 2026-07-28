@@ -28,10 +28,7 @@ struct CredentialStore: Sendable {
     }
 
     func cachedClaudeSnapshot(for slot: AccountSlot, identity: LocalIdentity, detail: String) -> AccountSnapshot? {
-        guard let directory = slot.profileDirectory else { return nil }
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(directory, isDirectory: true)
-            .appendingPathComponent(".claude.json")
+        guard let url = claudeStateURL(for: slot) else { return nil }
 
         guard
             let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
@@ -42,6 +39,23 @@ struct CredentialStore: Sendable {
             return nil
         }
 
+        let account = root["oauthAccount"] as? [String: Any]
+        let registryIdentity = LocalIdentity(
+            email: account?["emailAddress"] as? String ?? identity.email ?? slot.configuredEmail,
+            displayName: account?["displayName"] as? String ?? identity.displayName,
+            organizationName: account?["organizationName"] as? String ?? identity.organizationName
+        )
+        let plan = claudePlan(from: account)
+
+        guard cacheMatchesClaudeIdentity(root: root, cached: cached) else {
+            return AccountSnapshot.staleCache(
+                slot,
+                identity: registryIdentity.preferredDisplay ?? slot.localLabel,
+                plan: plan,
+                detail: "Keychain access not granted. This local quota cache belongs to another account, so no values are shown."
+            )
+        }
+
         var windows: [UsageWindow] = []
         if let fiveHour = usageWindow(from: utilization["five_hour"], id: "five-hour", title: "5-hour") {
             windows.append(fiveHour)
@@ -50,7 +64,7 @@ struct CredentialStore: Sendable {
             windows.append(sevenDay)
         }
         guard !windows.isEmpty else { return nil }
-        let extraUsage = extraUsageInfo(from: utilization)
+        let fableUsage = fableUsageWindow(from: utilization)
 
         let fetchedAt: Date?
         if let milliseconds = cached["fetchedAtMs"] as? Double {
@@ -59,28 +73,17 @@ struct CredentialStore: Sendable {
             fetchedAt = nil
         }
 
-        let providerAccountID = cached["accountUuid"] as? String
-        let plan: String
-        if
-            let account = root["oauthAccount"] as? [String: Any],
-            let organizationType = account["organizationType"] as? String
-        {
-            plan = organizationType
-                .replacingOccurrences(of: "claude_", with: "", options: .caseInsensitive)
-                .replacingOccurrences(of: "_", with: " ")
-                .capitalized
-        } else {
-            plan = "Claude"
-        }
+        let providerAccountID = (account?["accountUuid"] as? String)
+            ?? (cached["accountUuid"] as? String)
 
         return AccountSnapshot(
             id: slot.id,
             slot: slot,
-            identity: identity.preferredDisplay ?? slot.localLabel,
+            identity: registryIdentity.preferredDisplay ?? slot.localLabel,
             plan: plan,
             state: .cached,
             windows: windows,
-            extraUsage: extraUsage,
+            fableUsage: fableUsage,
             providerAccountID: providerAccountID,
             detail: detail,
             refreshedAt: fetchedAt,
@@ -134,12 +137,9 @@ struct CredentialStore: Sendable {
     }
 
     private func readClaudeIdentity(_ slot: AccountSlot) -> LocalIdentity {
-        guard let directory = slot.profileDirectory else {
+        guard let url = claudeStateURL(for: slot) else {
             return LocalIdentity(email: slot.configuredEmail, displayName: nil, organizationName: nil)
         }
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(directory, isDirectory: true)
-            .appendingPathComponent(".claude.json")
 
         guard
             let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
@@ -151,10 +151,42 @@ struct CredentialStore: Sendable {
 
         let email = account["emailAddress"] as? String
         return LocalIdentity(
-            email: slot.configuredEmail ?? email,
+            email: email ?? slot.configuredEmail,
             displayName: account["displayName"] as? String,
             organizationName: account["organizationName"] as? String
         )
+    }
+
+    func claudeStateURL(for slot: AccountSlot) -> URL? {
+        guard let relativePath = slot.claudeStatePath else { return nil }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(relativePath)
+    }
+
+    func cacheMatchesClaudeIdentity(
+        root: [String: Any],
+        cached: [String: Any]
+    ) -> Bool {
+        guard
+            let account = root["oauthAccount"] as? [String: Any],
+            let registryID = account["accountUuid"] as? String,
+            !registryID.isEmpty,
+            let cachedID = cached["accountUuid"] as? String,
+            !cachedID.isEmpty
+        else {
+            return true
+        }
+        return registryID == cachedID
+    }
+
+    private func claudePlan(from account: [String: Any]?) -> String {
+        guard let organizationType = account?["organizationType"] as? String else {
+            return "Claude"
+        }
+        return organizationType
+            .replacingOccurrences(of: "claude_", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "_", with: " ")
+            .capitalized
     }
 
     private func usageWindow(from raw: Any?, id: String, title: String) -> UsageWindow? {
@@ -165,56 +197,36 @@ struct CredentialStore: Sendable {
         return UsageWindow(id: id, title: title, usedPercent: used, resetAt: resetAt)
     }
 
-    func extraUsageInfo(from utilization: [String: Any]) -> ExtraUsageInfo {
-        if let extra = utilization["extra_usage"] as? [String: Any] {
-            if let percent = number(extra["utilization"]) {
-                return ExtraUsageInfo(
-                    state: .available,
-                    usedPercent: percent,
-                    status: "\(Int(max(0, min(100, 100 - percent)).rounded()))% remaining"
-                )
-            }
-            if extra["is_enabled"] as? Bool == false {
-                return ExtraUsageInfo(
-                    state: .disabled,
-                    usedPercent: nil,
-                    status: "Not enabled"
-                )
-            }
-            if extra["spend_limit_reached"] as? Bool == true {
-                return ExtraUsageInfo(
-                    state: .available,
-                    usedPercent: nil,
-                    status: "Spend limit reached"
-                )
-            }
-            if extra["is_enabled"] as? Bool == true {
-                return ExtraUsageInfo(
-                    state: .available,
-                    usedPercent: nil,
-                    status: "Enabled · amount unavailable"
-                )
-            }
+    func fableUsageWindow(from utilization: [String: Any]) -> UsageWindow? {
+        guard let limits = utilization["limits"] as? [[String: Any]] else {
+            return nil
         }
 
-        if let spend = utilization["spend"] as? [String: Any] {
-            if spend["enabled"] as? Bool == false {
-                return ExtraUsageInfo(
-                    state: .disabled,
-                    usedPercent: nil,
-                    status: "Not enabled"
-                )
+        let candidates = limits.filter { limit in
+            guard
+                (limit["kind"] as? String) == "weekly_scoped",
+                let scope = limit["scope"] as? [String: Any],
+                let model = scope["model"] as? [String: Any],
+                let displayName = model["display_name"] as? String
+            else {
+                return false
             }
-            if let percent = number(spend["percent"]) {
-                return ExtraUsageInfo(
-                    state: .available,
-                    usedPercent: percent,
-                    status: "\(Int(max(0, min(100, 100 - percent)).rounded()))% remaining"
-                )
-            }
+            return displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Fable") == .orderedSame
         }
 
-        return .unavailable
+        let selected = candidates.first { $0["is_active"] as? Bool == true }
+            ?? candidates.first
+        guard let selected, let percent = number(selected["percent"]) else {
+            return nil
+        }
+
+        return UsageWindow(
+            id: "fable-weekly",
+            title: "Fable usage",
+            usedPercent: percent,
+            resetAt: (selected["resets_at"] as? String).flatMap(Self.parseISO8601)
+        )
     }
 
     private func number(_ raw: Any?) -> Double? {

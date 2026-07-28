@@ -105,7 +105,7 @@ struct ProviderAPI {
             plan: friendlyPlan(response.planType ?? "Codex"),
             state: .live,
             windows: windows,
-            extraUsage: nil,
+            fableUsage: nil,
             providerAccountID: credential.accountID,
             detail: nil,
             refreshedAt: Date(),
