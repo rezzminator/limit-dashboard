@@ -1,3 +1,5 @@
+import AppKit
+import Charts
 import SwiftUI
 
 struct DashboardView: View {
@@ -27,14 +29,22 @@ struct DashboardView: View {
                     IssueBanner(text: issue)
                 }
 
+                HistoryChart(
+                    series: model.historySeries,
+                    error: model.historyError,
+                    vertexReport: model.vertexReport,
+                    vertexError: model.vertexError
+                )
+                .equatable()
+
                 Grid(horizontalSpacing: 18, verticalSpacing: 18) {
                     GridRow {
-                        AccountCard(snapshot: model.snapshots[0])
-                        AccountCard(snapshot: model.snapshots[1])
+                        AccountCard(snapshot: model.snapshots[0]).equatable()
+                        AccountCard(snapshot: model.snapshots[1]).equatable()
                     }
                     GridRow {
-                        AccountCard(snapshot: model.snapshots[2])
-                        AccountCard(snapshot: model.snapshots[3])
+                        AccountCard(snapshot: model.snapshots[2]).equatable()
+                        AccountCard(snapshot: model.snapshots[3]).equatable()
                     }
                 }
                 .frame(maxHeight: .infinity)
@@ -44,6 +54,7 @@ struct DashboardView: View {
             .padding(26)
         }
         .frame(minWidth: 920, minHeight: 720)
+        .background(WindowFocusResetter())
         .onAppear {
             refreshIntervalSeconds = validatedInterval
         }
@@ -79,7 +90,7 @@ struct DashboardView: View {
             RefreshIntervalControl(seconds: intervalBinding)
 
             Button {
-                Task { await model.refresh() }
+                Task { await model.refresh(showActivity: true) }
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
                     .font(.system(size: 13, weight: .semibold))
@@ -185,8 +196,346 @@ private struct IssueBanner: View {
     }
 }
 
-private struct AccountCard: View {
+private struct HistoryChart: View, Equatable {
+    let series: [ChartSeries]
+    let error: String?
+    let vertexReport: VertexReport?
+    let vertexError: String?
+
+    nonisolated static func == (lhs: HistoryChart, rhs: HistoryChart) -> Bool {
+        lhs.series == rhs.series
+            && lhs.error == rhs.error
+            && lhs.vertexReport == rhs.vertexReport
+            && lhs.vertexError == rhs.vertexError
+    }
+
+    private var hasPoints: Bool {
+        series.contains { !$0.points.isEmpty }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Local usage history")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                    Text("Quota and Vertex use separate, honestly labeled scales")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                historyLegend
+            }
+
+            HStack(spacing: 15) {
+                quotaPanel
+
+                Divider()
+                    .overlay(Color.white.opacity(0.10))
+
+                vertexPanel
+                    .frame(width: 390)
+            }
+        }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 12)
+        .frame(height: 226)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.10))
+        }
+    }
+
+    private var quotaPanel: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("PRIMARY LIMIT REMAINING · 24H · 5-MIN AVG")
+                .font(.system(size: 8, weight: .heavy))
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+
+            if let error {
+                Text(error)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            } else if hasPoints {
+                Chart {
+                    ForEach(series) { account in
+                        ForEach(account.points) { point in
+                            LineMark(
+                                x: .value("Time", point.timestamp),
+                                y: .value("Remaining", point.value),
+                                series: .value("Account", account.id)
+                            )
+                            .foregroundStyle(color(for: account.id))
+                            .lineStyle(.init(lineWidth: 2))
+                            .interpolationMethod(.linear)
+
+                            PointMark(
+                                x: .value("Time", point.timestamp),
+                                y: .value("Remaining", point.value)
+                            )
+                            .foregroundStyle(color(for: account.id))
+                            .symbolSize(18)
+                        }
+                    }
+                }
+                .chartYScale(domain: 0...100)
+                .chartYAxis {
+                    AxisMarks(position: .leading, values: [0, 50, 100]) { value in
+                        AxisGridLine()
+                            .foregroundStyle(Color.secondary.opacity(0.12))
+                        AxisValueLabel {
+                            if let percent = value.as(Int.self) {
+                                Text("\(percent)%")
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 6)) {
+                        AxisGridLine()
+                            .foregroundStyle(Color.secondary.opacity(0.08))
+                        AxisValueLabel(format: .dateTime.hour().minute())
+                    }
+                }
+                .chartLegend(.hidden)
+            } else {
+                Text("History begins with local refresh snapshots.")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+    }
+
+    private var vertexPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("VERTEX AI · \(summaryWindowLabel)")
+                        .font(.system(size: 8, weight: .heavy))
+                        .tracking(0.6)
+                        .foregroundStyle(.secondary)
+                    if let estimatedEUR = vertexReport?.estimatedEUR {
+                        Text("~€\(estimatedEUR, format: .number.precision(.fractionLength(2)))")
+                            .font(.system(size: 22, weight: .bold, design: .rounded))
+                        Text("estimated list price · not an invoice")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text("Estimate unavailable")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                    }
+                }
+                Spacer()
+                if let warnings = vertexReport?.pricingWarnings, !warnings.isEmpty {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help(warnings.joined(separator: "\n"))
+                }
+            }
+
+            if let report = vertexReport {
+                HStack(spacing: 7) {
+                    VertexMetric(
+                        label: "Input, not explicit",
+                        value: compactTokens(
+                            report.totals.inputNotMarkedExplicitCache
+                        )
+                    )
+                    VertexMetric(
+                        label: "Explicit-cache served",
+                        value: report.totals.explicitCacheMetricReported
+                            ? compactTokens(report.totals.explicitCacheServedInput)
+                            : "Not reported"
+                    )
+                    VertexMetric(
+                        label: "Output",
+                        value: compactTokens(report.totals.output)
+                    )
+                    VertexMetric(
+                        label: "Implicit hits",
+                        value: "Unavailable"
+                    )
+                }
+
+                Text(vertexChartLabel(report))
+                    .font(.system(size: 8, weight: .heavy))
+                    .tracking(0.5)
+                    .foregroundStyle(.secondary)
+
+                Chart(report.series.points) { point in
+                    AreaMark(
+                        x: .value("Day", point.timestamp),
+                        y: .value("Tokens", point.value)
+                    )
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color.blue.opacity(0.35),
+                                Color.blue.opacity(0.03),
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+
+                    LineMark(
+                        x: .value("Day", point.timestamp),
+                        y: .value("Tokens", point.value)
+                    )
+                    .foregroundStyle(.blue)
+                    .lineStyle(.init(lineWidth: 2))
+                }
+                .chartYAxis {
+                    AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                        AxisGridLine()
+                            .foregroundStyle(Color.secondary.opacity(0.10))
+                        AxisValueLabel {
+                            if let tokens = value.as(Double.self) {
+                                Text(compactTokens(Int64(tokens)))
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 4)) { value in
+                        AxisGridLine()
+                            .foregroundStyle(Color.secondary.opacity(0.06))
+                        AxisValueLabel {
+                            if let timestamp = value.as(Date.self) {
+                                Text(
+                                    chartTimeLabel(
+                                        timestamp,
+                                        span: report.chartEnd.timeIntervalSince(
+                                            report.chartStart
+                                        )
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+                .chartLegend(.hidden)
+            } else {
+                Text(vertexError ?? "Loading one local Monitoring report…")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(
+                        vertexError == nil ? Color.secondary : Color.orange
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+    }
+
+    private var summaryWindowLabel: String {
+        guard let report = vertexReport else { return "SUMMARY" }
+        return durationLabel(from: report.summaryStart, to: report.summaryEnd)
+    }
+
+    private func vertexChartLabel(_ report: VertexReport) -> String {
+        let window = durationLabel(from: report.chartStart, to: report.chartEnd)
+        let bucket = durationLabel(seconds: report.chartBucketSeconds)
+        return "TOKEN TOTALS · \(window) · \(bucket) SUM BUCKETS"
+    }
+
+    private func durationLabel(from start: Date, to end: Date) -> String {
+        durationLabel(seconds: max(0, Int(end.timeIntervalSince(start).rounded())))
+    }
+
+    private func durationLabel(seconds: Int) -> String {
+        if seconds.isMultiple(of: 86_400) {
+            return "\(seconds / 86_400)D"
+        }
+        if seconds.isMultiple(of: 3_600) {
+            return "\(seconds / 3_600)H"
+        }
+        if seconds.isMultiple(of: 60) {
+            return "\(seconds / 60)M"
+        }
+        return "\(seconds)S"
+    }
+
+    private func chartTimeLabel(_ timestamp: Date, span: TimeInterval) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        if span <= 48 * 60 * 60 {
+            formatter.setLocalizedDateFormatFromTemplate("HHmm")
+        } else {
+            formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        }
+        return formatter.string(from: timestamp)
+    }
+
+    private var historyLegend: some View {
+        HStack(spacing: 11) {
+            ForEach(series) { account in
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(color(for: account.id))
+                        .frame(width: 6, height: 6)
+                    Text(account.label)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private func color(for slotID: String) -> Color {
+        switch slotID {
+        case "claude-gmail":
+            Color(red: 0.96, green: 0.34, blue: 0.24)
+        case "claude-freudche":
+            Color(red: 0.96, green: 0.68, blue: 0.20)
+        case "claude-khosravi":
+            Color(red: 0.65, green: 0.42, blue: 0.95)
+        default:
+            Color(red: 0.16, green: 0.78, blue: 0.63)
+        }
+    }
+
+    private func compactTokens(_ value: Int64) -> String {
+        value.formatted(
+            .number
+                .notation(.compactName)
+                .precision(.fractionLength(0...1))
+        )
+    }
+}
+
+private struct VertexMetric: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(value)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .lineLimit(1)
+            Text(label)
+                .font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct AccountCard: View, Equatable {
     let snapshot: AccountSnapshot
+
+    nonisolated static func == (lhs: AccountCard, rhs: AccountCard) -> Bool {
+        lhs.snapshot == rhs.snapshot
+    }
 
     private var accent: Color {
         snapshot.slot.provider == .claude
@@ -269,13 +618,12 @@ private struct AccountCard: View {
     private func usageContent(_ headline: UsageWindow) -> some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("\(Int(headline.normalizedUsedPercent.rounded()))%")
+                Text("\(Int(headline.remainingPercent.rounded()))%")
                     .font(.system(size: 38, weight: .bold, design: .rounded))
-                    .contentTransition(.numericText())
-                Text("used")
+                Text("remaining")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text("· \(headline.remainingLabel)")
+                Text("· \(headline.usedLabel)")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -301,29 +649,20 @@ private struct AccountCard: View {
 
             Spacer(minLength: 0)
 
-            if snapshot.state == .cached || snapshot.duplicatePeer != nil {
+            if let peer = snapshot.duplicatePeer {
                 VStack(alignment: .leading, spacing: 6) {
-                    if snapshot.state == .cached, let detail = snapshot.detail {
-                        DetailStrip(
-                            icon: "key.slash",
-                            text: detail,
-                            color: .orange
-                        )
-                    }
-                    if let peer = snapshot.duplicatePeer {
-                        DetailStrip(
-                            icon: "person.2.badge.gearshape",
-                            text: "Same provider account as \(peer)",
-                            color: .orange
-                        )
-                    }
+                    DetailStrip(
+                        icon: "person.2.badge.gearshape",
+                        text: "Same provider account as \(peer)",
+                        color: .orange
+                    )
                 }
             } else {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(accent)
                         .frame(width: 5, height: 5)
-                    Text(snapshot.state == .live ? "Provider confirmed" : "Last known value")
+                    Text(snapshot.state == .live ? "Provider confirmed" : "Local quota snapshot")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -337,8 +676,8 @@ private struct AccountCard: View {
             Image(systemName: "person.crop.circle.badge.exclamationmark")
                 .font(.system(size: 28, weight: .medium))
                 .foregroundStyle(.orange)
-            Text(snapshot.state == .staleCache
-                 ? "Waiting for matching quota cache"
+            Text(snapshot.state == .quotaUnavailable
+                 ? "Quota snapshot unavailable"
                  : "Session needs attention")
                 .font(.system(size: 17, weight: .bold, design: .rounded))
             Text(snapshot.detail ?? "This account could not be refreshed.")
@@ -350,7 +689,7 @@ private struct AccountCard: View {
             }
             Spacer()
             Text(snapshot.slot.provider == .claude
-                 ? "Cached-only mode. No Keychain request will be made."
+                 ? "Waiting for this account’s own local quota snapshot."
                  : "Open Codex and sign in again.")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(accent)
@@ -374,6 +713,7 @@ private struct AccountCard: View {
 
 private struct RefreshIntervalControl: View {
     @Binding var seconds: Int
+    @FocusState private var intervalFieldFocused: Bool
 
     var body: some View {
         HStack(spacing: 6) {
@@ -381,6 +721,7 @@ private struct RefreshIntervalControl: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             TextField("20", value: $seconds, format: .number)
+                .focused($intervalFieldFocused)
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
                 .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -402,6 +743,30 @@ private struct RefreshIntervalControl: View {
         .frame(height: 48)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
         .help("Automatic refresh interval: 10–3600 seconds. The choice is saved.")
+        .onAppear {
+            intervalFieldFocused = false
+        }
+    }
+}
+
+private struct WindowFocusResetter: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        FocusClearingView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) { }
+
+    private final class FocusClearingView: NSView {
+        private var clearedInitialFocus = false
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil, !clearedInitialFocus else { return }
+            clearedInitialFocus = true
+            DispatchQueue.main.async { [weak self] in
+                self?.window?.makeFirstResponder(nil)
+            }
+        }
     }
 }
 
@@ -449,7 +814,7 @@ private struct StateBadge: View {
         switch state {
         case .live: .green
         case .cached: .orange
-        case .staleCache: .orange
+        case .quotaUnavailable: .orange
         case .loading: .blue
         case .unavailable: .red
         }

@@ -9,13 +9,13 @@ struct LimitDashboardApp: App {
             DashboardView(model: model)
                 .preferredColorScheme(.dark)
         }
-        .defaultSize(width: 980, height: 800)
+        .defaultSize(width: 1060, height: 940)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) { }
             CommandMenu("Dashboard") {
                 Button("Refresh All") {
-                    Task { await model.refresh() }
+                    Task { await model.refresh(showActivity: true) }
                 }
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.isRefreshing)

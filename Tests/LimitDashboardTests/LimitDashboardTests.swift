@@ -68,6 +68,102 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(RefreshPolicy.validated(99_999), 3_600)
     }
 
+    func testUnchangedPollSnapshotComparesEqualDespiteNewFetchTime() throws {
+        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let window = UsageWindow(
+            id: "five-hour",
+            title: "5-hour",
+            usedPercent: 7,
+            resetAt: nil
+        )
+        let first = AccountSnapshot(
+            id: slot.id,
+            slot: slot,
+            identity: "person@example.com",
+            plan: "Pro",
+            state: .cached,
+            windows: [window],
+            fableUsage: nil,
+            providerAccountID: "account-id",
+            detail: nil,
+            refreshedAt: Date(timeIntervalSince1970: 1),
+            duplicatePeer: nil
+        )
+        var nextPoll = first
+        nextPoll.refreshedAt = Date(timeIntervalSince1970: 2)
+
+        XCTAssertEqual(first, nextPoll)
+
+        nextPoll.windows = [
+            UsageWindow(
+                id: "five-hour",
+                title: "5-hour",
+                usedPercent: 8,
+                resetAt: nil
+            )
+        ]
+        XCTAssertNotEqual(first, nextPoll)
+    }
+
+    func testHistoryStoreAggregatesPrimaryRemainingValuesWithoutIdentityData() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-history-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("history.sqlite3")
+        let store = HistoryStore(databaseURL: databaseURL)
+        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+
+        func snapshot(usedPercent: Double) -> AccountSnapshot {
+            AccountSnapshot(
+                id: slot.id,
+                slot: slot,
+                identity: "private-email@example.com",
+                plan: "Plan",
+                state: .cached,
+                windows: [
+                    UsageWindow(
+                        id: "five-hour",
+                        title: "5-hour",
+                        usedPercent: usedPercent,
+                        resetAt: nil
+                    )
+                ],
+                fableUsage: UsageWindow(
+                    id: "fable",
+                    title: "Fable usage",
+                    usedPercent: 97,
+                    resetAt: nil
+                ),
+                providerAccountID: "provider-account-id",
+                detail: nil,
+                refreshedAt: start,
+                duplicatePeer: nil
+            )
+        }
+
+        try store.record([snapshot(usedPercent: 20)], at: start)
+        try store.record(
+            [snapshot(usedPercent: 40)],
+            at: start.addingTimeInterval(60)
+        )
+        let points = try store.loadPrimaryPoints(
+            since: start.addingTimeInterval(-1),
+            bucketSeconds: 300
+        )
+
+        XCTAssertEqual(points.count, 1)
+        XCTAssertEqual(points[0].seriesID, slot.id)
+        XCTAssertEqual(points[0].value, 70, accuracy: 0.001)
+
+        let databaseBytes = try Data(contentsOf: databaseURL)
+        let databaseText = String(decoding: databaseBytes, as: UTF8.self)
+        XCTAssertFalse(databaseText.contains("private-email@example.com"))
+        XCTAssertFalse(databaseText.contains("provider-account-id"))
+    }
+
     func testCachedClaudeFableUsageReadsExactWeeklyScopedEntry() throws {
         let fable = CredentialStore().fableUsageWindow(
             from: [
@@ -104,6 +200,68 @@ final class LimitDashboardTests: XCTestCase {
                 from: ["extra_usage": ["is_enabled": true, "utilization": 42]]
             )
         )
+    }
+
+    func testVertexReportDecoderKeepsChartAndSummaryWindowsIndependent() throws {
+        let payload = """
+        {
+          "schema_version": 2,
+          "project": "test-project",
+          "chart_window": {
+            "start": "2026-07-28T00:00:00+00:00",
+            "end": "2026-07-28T08:00:00+00:00",
+            "bucket_seconds": 1200
+          },
+          "summary_window": {
+            "start": "2026-06-28T08:00:00+00:00",
+            "end": "2026-07-28T08:00:00+00:00"
+          },
+          "series": {
+            "id": "vertex-ai-token-usage",
+            "label": "Vertex AI token totals",
+            "unit": "tokens",
+            "points": [
+              {"timestamp": "2026-07-28T00:00:00+00:00", "value": 1234}
+            ]
+          },
+          "token_totals": {
+            "input_not_marked_explicit_cache": 100,
+            "explicit_cache_served_input": 20,
+            "output": 30,
+            "total": 150,
+            "explicit_cache_metric_reported": true,
+            "implicit_cache_hit_tokens": null,
+            "implicit_cache_hit_rate": null,
+            "implicit_cache_status": "unavailable_historically_without_request_usage_metadata_cachedContentTokenCount"
+          },
+          "estimated_eur": 12.34,
+          "estimate_kind": "public_list_price_estimate_not_invoice",
+          "pricing_source": "test",
+          "pricing_warnings": ["fallback clearly flagged"]
+        }
+        """
+
+        let report = try VertexReportService().decode(Data(payload.utf8))
+
+        XCTAssertEqual(report.chartBucketSeconds, 1_200)
+        XCTAssertEqual(
+            report.chartEnd.timeIntervalSince(report.chartStart),
+            8 * 60 * 60,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            report.summaryEnd.timeIntervalSince(report.summaryStart),
+            30 * 24 * 60 * 60,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(report.series.id, "vertex-ai-token-usage")
+        XCTAssertEqual(report.series.unit, .tokens)
+        XCTAssertEqual(report.series.points.first?.value, 1_234)
+        XCTAssertEqual(report.totals.inputNotMarkedExplicitCache, 100)
+        XCTAssertEqual(report.totals.explicitCacheServedInput, 20)
+        XCTAssertTrue(report.totals.explicitCacheMetricReported)
+        XCTAssertEqual(report.totals.output, 30)
+        XCTAssertEqual(report.estimatedEUR, 12.34)
     }
 
     func testLocalCodexCredentialIsReadableWithoutExposingValues() throws {

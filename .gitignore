@@ -5,3 +5,5 @@
 *.zip
 Preview.png
 *.xcuserstate
+__pycache__/
+*.pyc

@@ -11,6 +11,7 @@ mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
 cp "$PROJECT_DIR/.build/release/LimitDashboard" "$APP_PATH/Contents/MacOS/LimitDashboard"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_PATH/Contents/Info.plist"
+cp "$PROJECT_DIR/scripts/vertex_ai_report.py" "$APP_PATH/Contents/Resources/vertex_ai_report.py"
 
 for size in 16 32 128 256 512; do
     mkdir -p "$ICON_WORK/AppIcon.iconset"

@@ -27,7 +27,11 @@ struct CredentialStore: Sendable {
         }
     }
 
-    func cachedClaudeSnapshot(for slot: AccountSlot, identity: LocalIdentity, detail: String) -> AccountSnapshot? {
+    func cachedClaudeSnapshot(
+        for slot: AccountSlot,
+        identity: LocalIdentity,
+        detail: String? = nil
+    ) -> AccountSnapshot? {
         guard let url = claudeStateURL(for: slot) else { return nil }
 
         guard
@@ -48,11 +52,11 @@ struct CredentialStore: Sendable {
         let plan = claudePlan(from: account)
 
         guard cacheMatchesClaudeIdentity(root: root, cached: cached) else {
-            return AccountSnapshot.staleCache(
+            return AccountSnapshot.quotaUnavailable(
                 slot,
                 identity: registryIdentity.preferredDisplay ?? slot.localLabel,
                 plan: plan,
-                detail: "Keychain access not granted. This local quota cache belongs to another account, so no values are shown."
+                detail: "This signed-in account has no matching local quota snapshot. A cache belonging to another account was ignored."
             )
         }
 
@@ -96,7 +100,7 @@ struct CredentialStore: Sendable {
         return .failed(
             slot,
             identity,
-            "Keychain access not granted. No Keychain request will be made."
+            "This signed-in account has no local quota snapshot yet."
         )
     }
 

@@ -12,7 +12,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "LimitDashboard",
-            path: "Sources/LimitDashboard"
+            path: "Sources/LimitDashboard",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         ),
         .testTarget(
             name: "LimitDashboardTests",

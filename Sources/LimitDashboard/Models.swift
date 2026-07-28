@@ -1,15 +1,15 @@
 import Foundation
 
-enum ProviderKind: String, Sendable {
+enum ProviderKind: String, Hashable, Sendable {
     case claude = "Claude"
     case codex = "Codex"
 }
 
-enum AccountState: String, Sendable {
+enum AccountState: String, Hashable, Sendable {
     case loading
     case live
     case cached
-    case staleCache
+    case quotaUnavailable
     case unavailable
 
     var title: String {
@@ -17,7 +17,7 @@ enum AccountState: String, Sendable {
         case .loading: "Refreshing"
         case .live: "Live"
         case .cached: "Cached"
-        case .staleCache: "Stale cache"
+        case .quotaUnavailable: "Quota unavailable"
         case .unavailable: "Unavailable"
         }
     }
@@ -104,7 +104,7 @@ struct UsageWindow: Identifiable, Hashable, Sendable {
     }
 }
 
-struct AccountSnapshot: Identifiable, Sendable {
+struct AccountSnapshot: Identifiable, Equatable, Sendable {
     let id: String
     let slot: AccountSlot
     var identity: String
@@ -154,7 +154,7 @@ struct AccountSnapshot: Identifiable, Sendable {
         )
     }
 
-    static func staleCache(
+    static func quotaUnavailable(
         _ slot: AccountSlot,
         identity: String,
         plan: String,
@@ -165,7 +165,7 @@ struct AccountSnapshot: Identifiable, Sendable {
             slot: slot,
             identity: identity,
             plan: plan,
-            state: .staleCache,
+            state: .quotaUnavailable,
             windows: [],
             fableUsage: nil,
             providerAccountID: nil,
@@ -173,6 +173,21 @@ struct AccountSnapshot: Identifiable, Sendable {
             refreshedAt: Date(),
             duplicatePeer: nil
         )
+    }
+
+    // `refreshedAt` is intentionally excluded. Polling the same visible values
+    // should not publish a new card or disturb SwiftUI view identity.
+    static func == (lhs: AccountSnapshot, rhs: AccountSnapshot) -> Bool {
+        lhs.id == rhs.id
+            && lhs.slot == rhs.slot
+            && lhs.identity == rhs.identity
+            && lhs.plan == rhs.plan
+            && lhs.state == rhs.state
+            && lhs.windows == rhs.windows
+            && lhs.fableUsage == rhs.fableUsage
+            && lhs.providerAccountID == rhs.providerAccountID
+            && lhs.detail == rhs.detail
+            && lhs.duplicatePeer == rhs.duplicatePeer
     }
 }
 
