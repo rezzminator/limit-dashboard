@@ -7,6 +7,10 @@ struct VertexTokenTotals: Equatable, Sendable {
     let output: Int64
     let total: Int64
     let implicitCacheStatus: String
+
+    var input: Int64 {
+        inputNotMarkedExplicitCache + explicitCacheServedInput
+    }
 }
 
 struct VertexReport: Equatable, Sendable {

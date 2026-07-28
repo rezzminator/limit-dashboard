@@ -114,7 +114,7 @@ final class LimitDashboardTests: XCTestCase {
         let databaseURL = directory.appendingPathComponent("history.sqlite3")
         let store = HistoryStore(databaseURL: databaseURL)
         let slot = try XCTUnwrap(AccountSlot.configured.first)
-        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let start = Date(timeIntervalSince1970: 1_800_000_123)
 
         func snapshot(usedPercent: Double) -> AccountSnapshot {
             AccountSnapshot(
@@ -156,7 +156,23 @@ final class LimitDashboardTests: XCTestCase {
 
         XCTAssertEqual(points.count, 1)
         XCTAssertEqual(points[0].seriesID, slot.id)
+        XCTAssertEqual(
+            points[0].timestamp,
+            start,
+            "The plotted bucket must begin at its first real measurement, not the bucket boundary."
+        )
         XCTAssertEqual(points[0].value, 70, accuracy: 0.001)
+        XCTAssertGreaterThan(
+            points[0].timestamp,
+            start.addingTimeInterval(-60 * 60),
+            "History must not backfill a point one hour before the first measurement."
+        )
+        XCTAssertFalse(
+            points.contains {
+                $0.timestamp <= start.addingTimeInterval(-60 * 60)
+            },
+            "No synthetic or carried-back history should be returned."
+        )
 
         let databaseBytes = try Data(contentsOf: databaseURL)
         let databaseText = String(decoding: databaseBytes, as: UTF8.self)
@@ -259,6 +275,7 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(report.series.points.first?.value, 1_234)
         XCTAssertEqual(report.totals.inputNotMarkedExplicitCache, 100)
         XCTAssertEqual(report.totals.explicitCacheServedInput, 20)
+        XCTAssertEqual(report.totals.input, 120)
         XCTAssertTrue(report.totals.explicitCacheMetricReported)
         XCTAssertEqual(report.totals.output, 30)
         XCTAssertEqual(report.estimatedEUR, 12.34)

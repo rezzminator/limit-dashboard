@@ -64,9 +64,17 @@ Manual refresh alone shows activity in the footer. Automatic refresh remains
 ## Local historical and Vertex charts
 
 - A Swift Charts panel at the top renders four stable, differently colored
-  series for each account card's primary Remaining percentage.
+  series for each account card's primary Remaining percentage on the left
+  axis, plus the Vertex token-total series on a distinct right token axis.
 - Refreshes record all available quota windows in a local SQLite database and
   read five-minute primary-limit averages for the last 24 hours.
+- The chart uses an explicit 24-hour x-domain. It plots only saved rows and
+  leaves time before the first measurement blank; it does not synthesize,
+  carry backward, or fill missing history with 100%.
+- Five-minute groups are positioned at the first actual measurement timestamp,
+  not the earlier five-minute boundary. The live database began at
+  approximately 18:07 local time and contained zero primary measurements an
+  hour earlier during verification.
 - SQLite rows contain only slot/metric IDs, timestamps, primary flags, and
   Used/Remaining percentages. They contain no emails, provider account IDs,
   plans, tokens, credentials, or raw responses.
@@ -74,10 +82,12 @@ Manual refresh alone shows activity in the footer. Automatic refresh remains
 - History changes publish only the equatable chart view; unchanged equatable
   account cards retain their SwiftUI identity.
 - The database currently contains primary rows for all four stable slot IDs.
-- A separate token-scale panel renders the last 8 hours of Vertex token totals
-  in 20-minute sum buckets by default, beside the independent 30-day token and
-  estimated-spend summary. Its range labels come from the script result rather
-  than fixed display strings.
+- Vertex contributes its last 8 hours of 20-minute sum buckets to the shared
+  chart. The separate full-width Vertex card is summary-only: input, output,
+  total tokens, and the independent 30-day estimated spend. No cache metric or
+  cache-availability message appears in that card.
+- The four account cards are content-height, fixed-height cards. Unused window
+  space is outside the cards and remains at the bottom of the window.
 
 The refresh interval TextField is explicitly unfocused on appearance, and a
 one-time AppKit bridge clears the window's initial first responder. Runtime
@@ -125,12 +135,12 @@ Accessibility inspection after opening and after an automatic refresh returned
 - Binary linkage check: no Security framework.
 - Source audit: no `SecItem`, `kSec`, Claude Keychain service, or Anthropic
   endpoint path.
-- Window render: visually inspected with all four cards, full emails, cached
+- Window render: visually inspected with all four compact cards, full emails, cached
   states, the corrected first account, the second account at 73% seven-day
   Used, the matching third account at 91% seven-day Used, remaining-first
   headlines, the persisted interval control, Claude Fable usage, live Codex
-  state, the four-series quota history chart, and the separately scaled Vertex
-  chart/30-day estimate.
+  state, the shared four-series quota/Vertex chart with distinct axes, and the
+  summary-only full-width Vertex estimate card.
 - Automatic-refresh render: before/after captures showed no loading replacement
   or layout/card redraw; only the freshness text advanced.
 

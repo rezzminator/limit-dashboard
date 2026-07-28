@@ -21,17 +21,23 @@ placing a caret in the numeric field.
 
 ## Local history and Vertex chart
 
-The top panel keeps two separate scales:
+The top chart keeps two honest scales in one shared 24-hour time plot:
 
-- The quota chart shows the last 24 hours of the primary Remaining value for
-  all four stable account slots, with a different color for each series.
-  Claude's primary series is its 5-hour window; Codex uses its primary weekly
-  window. Points are read as five-minute SQLite averages.
-- The Vertex chart shows token **sum totals** on a token scale, defaulting to
-  the last 8 hours in 20-minute buckets. Alongside it, a separate default
-  30-day summary shows input not marked explicit-cache, explicit-cache-served
-  input when reported, output tokens, and estimated EUR list-price spend.
-  The estimate is labeled as not an invoice.
+- The four account series use the left Remaining-percent axis. Claude's primary
+  series is its 5-hour window; Codex uses its primary weekly window.
+- Vertex token **sum totals** use the distinct right token axis, defaulting to
+  the last 8 hours in 20-minute buckets.
+
+The quota x-axis is always the full 24-hour range. Only actual SQLite
+measurements are plotted: the app does not synthesize, backfill, or carry a
+value backward before its first saved snapshot. Five-minute groups use the
+timestamp of their first real measurement, so a newly created history database
+leaves the earlier part of the chart blank.
+
+Below the four compact, fixed-height account cards, a separate full-width
+Vertex summary shows only input tokens, output tokens, total tokens, and the
+default 30-day estimated EUR list-price spend. It contains no cache fields or
+cache-availability messages. The estimate is labeled as not an invoice.
 
 On every refresh, the app records locally available quota windows in:
 

@@ -165,12 +165,13 @@ struct HistoryStore: Sendable {
             let query = """
                 SELECT
                     slot_id,
-                    CAST(captured_at / ? AS INTEGER) * ? AS time_bucket,
+                    CAST(captured_at / ? AS INTEGER) * ? AS bucket_key,
+                    MIN(captured_at) AS first_measurement,
                     AVG(remaining_percent)
                 FROM quota_snapshots
                 WHERE is_primary = 1 AND captured_at >= ?
-                GROUP BY slot_id, time_bucket
-                ORDER BY time_bucket ASC, slot_id ASC
+                GROUP BY slot_id, bucket_key
+                ORDER BY first_measurement ASC, slot_id ASC
                 """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK,
@@ -194,9 +195,9 @@ struct HistoryStore: Sendable {
                     ChartPoint(
                         seriesID: String(cString: slotBytes),
                         timestamp: Date(
-                            timeIntervalSince1970: sqlite3_column_double(statement, 1)
+                            timeIntervalSince1970: sqlite3_column_double(statement, 2)
                         ),
-                        value: sqlite3_column_double(statement, 2)
+                        value: sqlite3_column_double(statement, 3)
                     )
                 )
                 stepResult = sqlite3_step(statement)

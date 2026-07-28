@@ -22,7 +22,7 @@ struct DashboardView: View {
         ZStack {
             DashboardBackground()
 
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 10) {
                 header
 
                 if let issue = model.issueSummary {
@@ -32,26 +32,32 @@ struct DashboardView: View {
                 HistoryChart(
                     series: model.historySeries,
                     error: model.historyError,
-                    vertexReport: model.vertexReport,
-                    vertexError: model.vertexError
+                    vertexReport: model.vertexReport
                 )
                 .equatable()
 
-                Grid(horizontalSpacing: 18, verticalSpacing: 18) {
-                    GridRow {
+                Grid(horizontalSpacing: 10, verticalSpacing: 10) {
+                    GridRow(alignment: .top) {
                         AccountCard(snapshot: model.snapshots[0]).equatable()
                         AccountCard(snapshot: model.snapshots[1]).equatable()
                     }
-                    GridRow {
+                    GridRow(alignment: .top) {
                         AccountCard(snapshot: model.snapshots[2]).equatable()
                         AccountCard(snapshot: model.snapshots[3]).equatable()
                     }
                 }
-                .frame(maxHeight: .infinity)
+
+                VertexSummaryCard(
+                    report: model.vertexReport,
+                    error: model.vertexError
+                )
+                .equatable()
+
+                Spacer(minLength: 0)
 
                 footer
             }
-            .padding(26)
+            .padding(14)
         }
         .frame(minWidth: 920, minHeight: 720)
         .background(WindowFocusResetter())
@@ -200,46 +206,79 @@ private struct HistoryChart: View, Equatable {
     let series: [ChartSeries]
     let error: String?
     let vertexReport: VertexReport?
-    let vertexError: String?
 
     nonisolated static func == (lhs: HistoryChart, rhs: HistoryChart) -> Bool {
         lhs.series == rhs.series
             && lhs.error == rhs.error
             && lhs.vertexReport == rhs.vertexReport
-            && lhs.vertexError == rhs.vertexError
     }
 
     private var hasPoints: Bool {
         series.contains { !$0.points.isEmpty }
     }
 
+    private var allPoints: [ChartPoint] {
+        series.flatMap(\.points)
+    }
+
+    private var firstMeasurement: Date? {
+        allPoints.map(\.timestamp).min()
+    }
+
+    private var historyEnd: Date {
+        let latest = allPoints.map(\.timestamp).max() ?? Date()
+        return latest.addingTimeInterval(
+            TimeInterval(HistoryStore.chartBucketSeconds)
+        )
+    }
+
+    private var sharedEnd: Date {
+        max(historyEnd, vertexReport?.chartEnd ?? historyEnd)
+    }
+
+    private var sharedStart: Date {
+        sharedEnd.addingTimeInterval(-HistoryStore.chartWindow)
+    }
+
+    private var vertexAxisMax: Double {
+        max(1, vertexReport?.series.points.map(\.value).max() ?? 0)
+    }
+
+    private var hasChartData: Bool {
+        hasPoints || vertexReport?.series.points.isEmpty == false
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Local usage history")
+                    Text("Quota history")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
-                    Text("Quota and Vertex use separate, honestly labeled scales")
+                    if let error {
+                        Text(error)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.orange)
+                    } else if let firstMeasurement {
+                        Text(
+                            "Saved snapshots only · begins \(firstMeasurement, style: .time)"
+                        )
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
+                    } else {
+                        Text("No saved measurements yet")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 historyLegend
             }
 
-            HStack(spacing: 15) {
-                quotaPanel
-
-                Divider()
-                    .overlay(Color.white.opacity(0.10))
-
-                vertexPanel
-                    .frame(width: 390)
-            }
+            quotaPanel
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 12)
-        .frame(height: 226)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
+        .frame(height: 130)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -249,58 +288,118 @@ private struct HistoryChart: View, Equatable {
 
     private var quotaPanel: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("PRIMARY LIMIT REMAINING · 24H · 5-MIN AVG")
+            Text("PRIMARY REMAINING % · LEFT AXIS · VERTEX TOKENS · RIGHT AXIS · 24H")
                 .font(.system(size: 8, weight: .heavy))
                 .tracking(0.6)
                 .foregroundStyle(.secondary)
 
-            if let error {
-                Text(error)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            } else if hasPoints {
-                Chart {
-                    ForEach(series) { account in
-                        ForEach(account.points) { point in
-                            LineMark(
-                                x: .value("Time", point.timestamp),
-                                y: .value("Remaining", point.value),
-                                series: .value("Account", account.id)
-                            )
-                            .foregroundStyle(color(for: account.id))
-                            .lineStyle(.init(lineWidth: 2))
-                            .interpolationMethod(.linear)
+            if hasChartData {
+                HStack(spacing: 5) {
+                    Chart {
+                        ForEach(series) { account in
+                            ForEach(account.points) { point in
+                                LineMark(
+                                    x: .value("Time", point.timestamp),
+                                    y: .value("Remaining", point.value),
+                                    series: .value("Account", account.id)
+                                )
+                                .foregroundStyle(color(for: account.id))
+                                .lineStyle(.init(lineWidth: 2))
+                                .interpolationMethod(.linear)
 
-                            PointMark(
-                                x: .value("Time", point.timestamp),
-                                y: .value("Remaining", point.value)
-                            )
-                            .foregroundStyle(color(for: account.id))
-                            .symbolSize(18)
-                        }
-                    }
-                }
-                .chartYScale(domain: 0...100)
-                .chartYAxis {
-                    AxisMarks(position: .leading, values: [0, 50, 100]) { value in
-                        AxisGridLine()
-                            .foregroundStyle(Color.secondary.opacity(0.12))
-                        AxisValueLabel {
-                            if let percent = value.as(Int.self) {
-                                Text("\(percent)%")
+                                PointMark(
+                                    x: .value("Time", point.timestamp),
+                                    y: .value("Remaining", point.value)
+                                )
+                                .foregroundStyle(color(for: account.id))
+                                .symbolSize(18)
                             }
                         }
                     }
-                }
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 6)) {
-                        AxisGridLine()
-                            .foregroundStyle(Color.secondary.opacity(0.08))
-                        AxisValueLabel(format: .dateTime.hour().minute())
+                    .chartYScale(domain: 0...100)
+                    .chartXScale(domain: sharedStart...sharedEnd)
+                    .chartYAxis {
+                        AxisMarks(position: .leading, values: [0, 50, 100]) { value in
+                            AxisGridLine()
+                                .foregroundStyle(Color.secondary.opacity(0.12))
+                            AxisValueLabel {
+                                if let percent = value.as(Int.self) {
+                                    Text("\(percent)%")
+                                }
+                            }
+                        }
                     }
+                    .chartXAxis {
+                        AxisMarks(values: .automatic(desiredCount: 6)) {
+                            AxisGridLine()
+                                .foregroundStyle(Color.secondary.opacity(0.08))
+                            AxisValueLabel(format: .dateTime.hour().minute())
+                        }
+                    }
+                    .chartLegend(.hidden)
+                    .chartOverlay { proxy in
+                        GeometryReader { geometry in
+                            if let plotFrame = proxy.plotFrame,
+                               let report = vertexReport {
+                                let frame = geometry[plotFrame]
+                                Canvas { context, _ in
+                                    var path = Path()
+                                    var started = false
+                                    for point in report.series.points
+                                        where point.timestamp >= sharedStart
+                                            && point.timestamp <= sharedEnd {
+                                        guard let x = proxy.position(
+                                            forX: point.timestamp
+                                        ) else { continue }
+                                        let normalized = min(
+                                            1,
+                                            max(0, point.value / vertexAxisMax)
+                                        )
+                                        let position = CGPoint(
+                                            x: x,
+                                            y: frame.height * (1 - normalized)
+                                        )
+                                        if started {
+                                            path.addLine(to: position)
+                                        } else {
+                                            path.move(to: position)
+                                            started = true
+                                        }
+                                    }
+                                    context.stroke(
+                                        path,
+                                        with: .color(.blue),
+                                        style: StrokeStyle(
+                                            lineWidth: 2.2,
+                                            lineCap: .round,
+                                            lineJoin: .round
+                                        )
+                                    )
+                                }
+                                .frame(width: frame.width, height: frame.height)
+                                .offset(x: frame.minX, y: frame.minY)
+                                .allowsHitTesting(false)
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text(compactTokens(Int64(vertexAxisMax.rounded())))
+                        Spacer()
+                        if vertexAxisMax > 1 {
+                            Text(
+                                compactTokens(
+                                    Int64((vertexAxisMax / 2).rounded())
+                                )
+                            )
+                        }
+                        Spacer()
+                        Text("0")
+                    }
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40)
                 }
-                .chartLegend(.hidden)
             } else {
                 Text("History begins with local refresh snapshots.")
                     .font(.system(size: 11, weight: .semibold))
@@ -308,166 +407,6 @@ private struct HistoryChart: View, Equatable {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
-    }
-
-    private var vertexPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("VERTEX AI · \(summaryWindowLabel)")
-                        .font(.system(size: 8, weight: .heavy))
-                        .tracking(0.6)
-                        .foregroundStyle(.secondary)
-                    if let estimatedEUR = vertexReport?.estimatedEUR {
-                        Text("~€\(estimatedEUR, format: .number.precision(.fractionLength(2)))")
-                            .font(.system(size: 22, weight: .bold, design: .rounded))
-                        Text("estimated list price · not an invoice")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.orange)
-                    } else {
-                        Text("Estimate unavailable")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                    }
-                }
-                Spacer()
-                if let warnings = vertexReport?.pricingWarnings, !warnings.isEmpty {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .help(warnings.joined(separator: "\n"))
-                }
-            }
-
-            if let report = vertexReport {
-                HStack(spacing: 7) {
-                    VertexMetric(
-                        label: "Input, not explicit",
-                        value: compactTokens(
-                            report.totals.inputNotMarkedExplicitCache
-                        )
-                    )
-                    VertexMetric(
-                        label: "Explicit-cache served",
-                        value: report.totals.explicitCacheMetricReported
-                            ? compactTokens(report.totals.explicitCacheServedInput)
-                            : "Not reported"
-                    )
-                    VertexMetric(
-                        label: "Output",
-                        value: compactTokens(report.totals.output)
-                    )
-                    VertexMetric(
-                        label: "Implicit hits",
-                        value: "Unavailable"
-                    )
-                }
-
-                Text(vertexChartLabel(report))
-                    .font(.system(size: 8, weight: .heavy))
-                    .tracking(0.5)
-                    .foregroundStyle(.secondary)
-
-                Chart(report.series.points) { point in
-                    AreaMark(
-                        x: .value("Day", point.timestamp),
-                        y: .value("Tokens", point.value)
-                    )
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color.blue.opacity(0.35),
-                                Color.blue.opacity(0.03),
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-
-                    LineMark(
-                        x: .value("Day", point.timestamp),
-                        y: .value("Tokens", point.value)
-                    )
-                    .foregroundStyle(.blue)
-                    .lineStyle(.init(lineWidth: 2))
-                }
-                .chartYAxis {
-                    AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
-                        AxisGridLine()
-                            .foregroundStyle(Color.secondary.opacity(0.10))
-                        AxisValueLabel {
-                            if let tokens = value.as(Double.self) {
-                                Text(compactTokens(Int64(tokens)))
-                            }
-                        }
-                    }
-                }
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 4)) { value in
-                        AxisGridLine()
-                            .foregroundStyle(Color.secondary.opacity(0.06))
-                        AxisValueLabel {
-                            if let timestamp = value.as(Date.self) {
-                                Text(
-                                    chartTimeLabel(
-                                        timestamp,
-                                        span: report.chartEnd.timeIntervalSince(
-                                            report.chartStart
-                                        )
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-                .chartLegend(.hidden)
-            } else {
-                Text(vertexError ?? "Loading one local Monitoring report…")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(
-                        vertexError == nil ? Color.secondary : Color.orange
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            }
-        }
-    }
-
-    private var summaryWindowLabel: String {
-        guard let report = vertexReport else { return "SUMMARY" }
-        return durationLabel(from: report.summaryStart, to: report.summaryEnd)
-    }
-
-    private func vertexChartLabel(_ report: VertexReport) -> String {
-        let window = durationLabel(from: report.chartStart, to: report.chartEnd)
-        let bucket = durationLabel(seconds: report.chartBucketSeconds)
-        return "TOKEN TOTALS · \(window) · \(bucket) SUM BUCKETS"
-    }
-
-    private func durationLabel(from start: Date, to end: Date) -> String {
-        durationLabel(seconds: max(0, Int(end.timeIntervalSince(start).rounded())))
-    }
-
-    private func durationLabel(seconds: Int) -> String {
-        if seconds.isMultiple(of: 86_400) {
-            return "\(seconds / 86_400)D"
-        }
-        if seconds.isMultiple(of: 3_600) {
-            return "\(seconds / 3_600)H"
-        }
-        if seconds.isMultiple(of: 60) {
-            return "\(seconds / 60)M"
-        }
-        return "\(seconds)S"
-    }
-
-    private func chartTimeLabel(_ timestamp: Date, span: TimeInterval) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = .autoupdatingCurrent
-        formatter.timeZone = .autoupdatingCurrent
-        if span <= 48 * 60 * 60 {
-            formatter.setLocalizedDateFormatFromTemplate("HHmm")
-        } else {
-            formatter.setLocalizedDateFormatFromTemplate("MMMd")
-        }
-        return formatter.string(from: timestamp)
     }
 
     private var historyLegend: some View {
@@ -478,6 +417,17 @@ private struct HistoryChart: View, Equatable {
                         .fill(color(for: account.id))
                         .frame(width: 6, height: 6)
                     Text(account.label)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+            }
+            if vertexReport != nil {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.blue)
+                        .frame(width: 6, height: 6)
+                    Text("Vertex AI tokens · right axis")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -508,6 +458,118 @@ private struct HistoryChart: View, Equatable {
     }
 }
 
+private struct VertexSummaryCard: View, Equatable {
+    let report: VertexReport?
+    let error: String?
+
+    nonisolated static func == (
+        lhs: VertexSummaryCard,
+        rhs: VertexSummaryCard
+    ) -> Bool {
+        lhs.report == rhs.report && lhs.error == rhs.error
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Vertex AI summary")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                Text(summaryWindowLabel)
+                    .font(.system(size: 8, weight: .heavy))
+                    .tracking(0.6)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 150, alignment: .leading)
+
+            Divider()
+                .overlay(Color.white.opacity(0.10))
+
+            if let report {
+                VStack(alignment: .leading, spacing: 1) {
+                    if let estimatedEUR = report.estimatedEUR {
+                        Text(
+                            "~€\(estimatedEUR, format: .number.precision(.fractionLength(2)))"
+                        )
+                        .font(.system(size: 23, weight: .bold, design: .rounded))
+                    } else {
+                        Text("Unavailable")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                    }
+                    Text("estimated list price · not an invoice")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.orange)
+                }
+                .frame(width: 190, alignment: .leading)
+
+                VertexMetric(
+                    label: "Input tokens",
+                    value: compactTokens(report.totals.input)
+                )
+                VertexMetric(
+                    label: "Output tokens",
+                    value: compactTokens(report.totals.output)
+                )
+                VertexMetric(
+                    label: "Total tokens",
+                    value: compactTokens(report.totals.total)
+                )
+
+                Spacer()
+
+                if !report.pricingWarnings.isEmpty {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help(report.pricingWarnings.joined(separator: "\n"))
+                }
+            } else {
+                Text(error ?? "Loading one local Monitoring summary…")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(error == nil ? Color.secondary : Color.orange)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .frame(height: 78)
+        .background(
+            .thinMaterial,
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.10))
+        }
+    }
+
+    private var summaryWindowLabel: String {
+        guard let report else { return "SUMMARY WINDOW" }
+        return "\(durationLabel(from: report.summaryStart, to: report.summaryEnd)) SUMMARY"
+    }
+
+    private func durationLabel(from start: Date, to end: Date) -> String {
+        let seconds = max(0, Int(end.timeIntervalSince(start).rounded()))
+        if seconds.isMultiple(of: 86_400) {
+            return "\(seconds / 86_400)D"
+        }
+        if seconds.isMultiple(of: 3_600) {
+            return "\(seconds / 3_600)H"
+        }
+        if seconds.isMultiple(of: 60) {
+            return "\(seconds / 60)M"
+        }
+        return "\(seconds)S"
+    }
+
+    private func compactTokens(_ value: Int64) -> String {
+        value.formatted(
+            .number
+                .notation(.compactName)
+                .precision(.fractionLength(0...1))
+        )
+    }
+}
+
 private struct VertexMetric: View {
     let label: String
     let value: String
@@ -515,18 +577,19 @@ private struct VertexMetric: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(value)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(.system(size: 14, weight: .bold, design: .rounded))
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 7, weight: .bold))
+                .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+        .frame(width: 116, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 
@@ -547,9 +610,17 @@ private struct AccountCard: View, Equatable {
         snapshot.windows.first
     }
 
+    private var cardHeight: CGFloat {
+        guard snapshot.state != .unavailable,
+              snapshot.state != .quotaUnavailable else {
+            return 148
+        }
+        return snapshot.slot.provider == .claude ? 148 : 106
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 9) {
                 ProviderIcon(provider: snapshot.slot.provider, accent: accent)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -565,6 +636,31 @@ private struct AccountCard: View, Equatable {
                 }
 
                 Spacer()
+
+                if let headlineWindow,
+                   snapshot.state != .loading {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(
+                                "\(Int(headlineWindow.remainingPercent.rounded()))%"
+                            )
+                            .font(
+                                .system(
+                                    size: 24,
+                                    weight: .bold,
+                                    design: .rounded
+                                )
+                            )
+                            Text("remaining")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(headlineWindow.usedLabel)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 StateBadge(state: snapshot.state)
             }
 
@@ -576,8 +672,9 @@ private struct AccountCard: View, Equatable {
                 unavailableContent
             }
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, minHeight: 240, maxHeight: .infinity, alignment: .topLeading)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(height: cardHeight, alignment: .topLeading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -593,106 +690,72 @@ private struct AccountCard: View, Equatable {
     }
 
     private var loadingContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.secondary.opacity(0.12))
-                .frame(width: 138, height: 32)
-            RoundedRectangle(cornerRadius: 5)
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Reading local session")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            RoundedRectangle(cornerRadius: 4)
                 .fill(Color.secondary.opacity(0.10))
-                .frame(height: 10)
-            RoundedRectangle(cornerRadius: 5)
-                .fill(Color.secondary.opacity(0.08))
-                .frame(width: 190, height: 10)
-            Spacer()
-            HStack {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Reading local session")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
+                .frame(height: 7)
         }
         .redacted(reason: .placeholder)
     }
 
     private func usageContent(_ headline: UsageWindow) -> some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("\(Int(headline.remainingPercent.rounded()))%")
-                    .font(.system(size: 38, weight: .bold, design: .rounded))
-                Text("remaining")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text("· \(headline.usedLabel)")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if let resetAt = headline.resetAt {
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(headline.title.uppercased())
-                            .font(.system(size: 9, weight: .bold))
-                            .tracking(0.8)
-                            .foregroundStyle(.secondary)
-                        Text("resets \(compactReset(resetAt))")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
+        VStack(alignment: .leading, spacing: 6) {
             ForEach(snapshot.windows.prefix(2)) { window in
-                LimitRow(window: window, accent: accent)
+                CompactLimitRow(window: window, accent: accent)
             }
             if snapshot.slot.provider == .claude {
-                FableUsageRow(window: snapshot.fableUsage, accent: accent)
+                CompactFableRow(window: snapshot.fableUsage, accent: accent)
             }
 
-            Spacer(minLength: 0)
-
             if let peer = snapshot.duplicatePeer {
-                VStack(alignment: .leading, spacing: 6) {
-                    DetailStrip(
-                        icon: "person.2.badge.gearshape",
-                        text: "Same provider account as \(peer)",
-                        color: .orange
-                    )
-                }
+                DetailStrip(
+                    icon: "person.2.badge.gearshape",
+                    text: "Same provider account as \(peer)",
+                    color: .orange
+                )
             } else {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(accent)
                         .frame(width: 5, height: 5)
                     Text(snapshot.state == .live ? "Provider confirmed" : "Local quota snapshot")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
+                    if let resetAt = headline.resetAt {
+                        Text("· resets \(compactReset(resetAt))")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
     }
 
     private var unavailableContent: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Spacer(minLength: 2)
+        HStack(alignment: .top, spacing: 9) {
             Image(systemName: "person.crop.circle.badge.exclamationmark")
-                .font(.system(size: 28, weight: .medium))
+                .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(.orange)
-            Text(snapshot.state == .quotaUnavailable
-                 ? "Quota snapshot unavailable"
-                 : "Session needs attention")
-                .font(.system(size: 17, weight: .bold, design: .rounded))
-            Text(snapshot.detail ?? "This account could not be refreshed.")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if snapshot.slot.provider == .claude {
-                FableUsageRow(window: snapshot.fableUsage, accent: accent)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(snapshot.state == .quotaUnavailable
+                     ? "Quota snapshot unavailable"
+                     : "Session needs attention")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                Text(snapshot.detail ?? "This account could not be refreshed.")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text(snapshot.slot.provider == .claude
+                     ? "Waiting for this account’s own local quota snapshot."
+                     : "Open Codex and sign in again.")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(accent)
             }
-            Spacer()
-            Text(snapshot.slot.provider == .claude
-                 ? "Waiting for this account’s own local quota snapshot."
-                 : "Open Codex and sign in again.")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(accent)
         }
     }
 
@@ -785,10 +848,10 @@ private struct ProviderIcon: View {
                     )
                 )
             Image(systemName: provider == .claude ? "sparkles" : "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 18, weight: .bold))
+                .font(.system(size: 15, weight: .bold))
                 .foregroundStyle(.white)
         }
-        .frame(width: 42, height: 42)
+        .frame(width: 36, height: 36)
         .shadow(color: accent.opacity(0.24), radius: 9, y: 4)
     }
 }
@@ -832,6 +895,75 @@ private struct StateBadge: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(color.opacity(0.10), in: Capsule())
+    }
+}
+
+private struct CompactLimitRow: View {
+    let window: UsageWindow
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(window.title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.secondary.opacity(0.12))
+                    Capsule()
+                        .fill(accent)
+                        .frame(
+                            width: proxy.size.width
+                                * window.normalizedUsedPercent / 100
+                        )
+                }
+            }
+            .frame(height: 5)
+            Text("\(window.usedLabel) · \(window.remainingLabel)")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .frame(width: 158, alignment: .trailing)
+        }
+        .frame(height: 16)
+    }
+}
+
+private struct CompactFableRow: View {
+    let window: UsageWindow?
+    let accent: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Fable")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+            if let window {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.secondary.opacity(0.12))
+                        Capsule()
+                            .fill(accent)
+                            .frame(
+                                width: proxy.size.width
+                                    * window.normalizedUsedPercent / 100
+                            )
+                    }
+                }
+                .frame(height: 5)
+                Text("\(window.usedLabel) · \(window.remainingLabel)")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .frame(width: 158, alignment: .trailing)
+            } else {
+                Spacer()
+                Text("Unavailable in local cache")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.orange)
+            }
+        }
+        .frame(height: 16)
     }
 }
 
