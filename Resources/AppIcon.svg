@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="80" y1="80" x2="944" y2="944" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#17202C"/>
+      <stop offset="1" stop-color="#081018"/>
+    </linearGradient>
+    <linearGradient id="claude" x1="230" y1="220" x2="520" y2="540" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F08A64"/>
+      <stop offset="1" stop-color="#C64E35"/>
+    </linearGradient>
+    <linearGradient id="codex" x1="510" y1="480" x2="810" y2="810" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#42D8A4"/>
+      <stop offset="1" stop-color="#14936E"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#000" flood-opacity=".35"/>
+    </filter>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)"/>
+  <path d="M148 512C148 311 311 148 512 148" fill="none" stroke="url(#claude)" stroke-width="116" stroke-linecap="round" filter="url(#shadow)"/>
+  <path d="M876 512C876 713 713 876 512 876" fill="none" stroke="url(#codex)" stroke-width="116" stroke-linecap="round" filter="url(#shadow)"/>
+  <circle cx="512" cy="512" r="108" fill="#F4F7FA"/>
+  <path d="M512 440v144M440 512h144" stroke="#111C27" stroke-width="34" stroke-linecap="round"/>
+  <circle cx="512" cy="148" r="28" fill="#FFB095"/>
+  <circle cx="512" cy="876" r="28" fill="#73E8C0"/>
+</svg>
