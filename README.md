@@ -19,14 +19,21 @@ The interval field does not receive initial focus. The window opens with a
 neutral window focus, and background refreshes preserve that focus instead of
 placing a caret in the numeric field.
 
-## Local history and Vertex chart
+The interface uses native SwiftUI materials, restrained provider accents,
+rounded system typography, and subtle static shadows. It contains no broad
+refresh animation or web-style navigation chrome.
 
-The top chart keeps two honest scales in one shared 24-hour time plot:
+## Local history and Vertex charts
 
-- The four account series use the left Remaining-percent axis. Claude's primary
-  series is its 5-hour window; Codex uses its primary weekly window.
-- Vertex token **sum totals** use the distinct right token axis, defaulting to
-  the last 8 hours in 20-minute buckets.
+The dashboard keeps unlike measurements in two separate chart boxes:
+
+- **Quota history** plots the four account cards' primary Remaining percentages
+  over 24 hours. Claude uses its 5-hour window; Codex uses its primary weekly
+  window.
+- **Vertex AI token usage** plots actual Cloud Monitoring token **sum totals**
+  over the last 30 days in one-day buckets, on its own token axis. A visible
+  zero line and explanatory status are shown when the provider reports no
+  tokens in the window; zero usage is not treated as an error.
 
 The quota x-axis is always the full 24-hour range. Only actual SQLite
 measurements are plotted: the app does not synthesize, backfill, or carry a
@@ -34,10 +41,15 @@ value backward before its first saved snapshot. Five-minute groups use the
 timestamp of their first real measurement, so a newly created history database
 leaves the earlier part of the chart blank.
 
-Below the four compact, fixed-height account cards, a separate full-width
-Vertex summary shows only input tokens, output tokens, total tokens, and the
-default 30-day estimated EUR list-price spend. It contains no cache fields or
-cache-availability messages. The estimate is labeled as not an invoice.
+The Vertex chart is fetched from Cloud Monitoring and is not persisted in the
+quota SQLite database. The two charts do not normalize or equate quota
+percentages with token counts.
+
+The Vertex chart and its summary are one full-width unified card: the summary
+sits directly below the plot and shows only input tokens, output tokens, total
+tokens, and the default 30-day estimated EUR list-price spend. It contains no
+cache fields or cache-availability messages. The estimate is labeled as not an
+invoice.
 
 On every refresh, the app records locally available quota windows in:
 
@@ -109,6 +121,37 @@ usage:
 A current public Claude Code issue includes the corresponding cached payload
 shape:
 <https://github.com/anthropics/claude-code/issues/78507>.
+
+## Supported historical-usage surfaces
+
+Official provider documentation confirms these distinct supported paths:
+
+- Codex has a supported local app-server JSON-RPC method,
+  `account/usage/read`, for authenticated ChatGPT token-activity summaries and
+  optional daily buckets. The Codex CLI also exposes `/usage daily`,
+  `/usage weekly`, and `/usage cumulative`. ChatGPT workspace administrators
+  have a separate Codex Analytics API; the OpenAI Platform Organization Usage
+  API is for API traffic, not personal ChatGPT subscription history. See the
+  official [Codex app-server](https://developers.openai.com/codex/app-server),
+  [Codex CLI commands](https://developers.openai.com/codex/cli/slash-commands),
+  and [Codex Analytics API](https://learn.chatgpt.com/docs/enterprise/analytics-api)
+  documentation.
+- Claude Code's supported `/usage` command shows session cost, plan limits, and
+  activity statistics; its documented `~/.claude/stats-cache.json` contains
+  the aggregated historical totals shown by that command. Anthropic also
+  offers daily Claude Code Analytics APIs for organizations, using an Admin
+  API key or an Enterprise Analytics API key. Anthropic explicitly says the
+  organization analytics feature is unavailable to individual Pro or Max
+  accounts, and documents no authenticated individual-subscription API for
+  historical token buckets. See the official
+  [Claude Code commands](https://code.claude.com/docs/en/commands),
+  [local data layout](https://code.claude.com/docs/en/claude-directory),
+  [Claude Code Analytics API](https://platform.claude.com/docs/en/manage-claude/claude-code-analytics-api),
+  and [analytics availability](https://support.claude.com/en/articles/12157520-claude-code-usage-analytics)
+  documentation.
+
+This release does not integrate either provider's historical-usage surface; it
+only implements the requested Vertex chart layout.
 
 ## Vertex AI reporting helpers
 

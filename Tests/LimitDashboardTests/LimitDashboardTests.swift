@@ -281,6 +281,64 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(report.estimatedEUR, 12.34)
     }
 
+    func testDashboardRequestsThirtyDailyVertexBuckets() {
+        XCTAssertEqual(
+            VertexReportService.dashboardArguments,
+            [
+                "--chart-last", "30d",
+                "--chart-interval", "1d",
+                "--summary-last", "30d",
+                "--timezone", "local",
+                "--json",
+            ]
+        )
+    }
+
+    func testZeroVertexBucketsAreValidMeasurementsWithoutActivity() throws {
+        let payload = """
+        {
+          "schema_version": 2,
+          "project": "test-project",
+          "chart_window": {
+            "start": "2026-06-28T00:00:00+00:00",
+            "end": "2026-07-28T00:00:00+00:00",
+            "bucket_seconds": 86400
+          },
+          "summary_window": {
+            "start": "2026-06-28T00:00:00+00:00",
+            "end": "2026-07-28T00:00:00+00:00"
+          },
+          "series": {
+            "id": "vertex-ai-token-usage",
+            "label": "Vertex AI token totals",
+            "unit": "tokens",
+            "points": [
+              {"timestamp": "2026-06-28T00:00:00+00:00", "value": 0},
+              {"timestamp": "2026-06-29T00:00:00+00:00", "value": 0}
+            ]
+          },
+          "token_totals": {
+            "input_not_marked_explicit_cache": 0,
+            "explicit_cache_served_input": 0,
+            "output": 0,
+            "total": 0,
+            "explicit_cache_metric_reported": false,
+            "implicit_cache_hit_tokens": null,
+            "implicit_cache_hit_rate": null,
+            "implicit_cache_status": "unavailable"
+          },
+          "estimated_eur": 0,
+          "estimate_kind": "public_list_price_estimate_not_invoice",
+          "pricing_source": "test",
+          "pricing_warnings": []
+        }
+        """
+
+        let report = try VertexReportService().decode(Data(payload.utf8))
+        XCTAssertEqual(report.series.points.count, 2)
+        XCTAssertFalse(report.hasChartActivity)
+    }
+
     func testLocalCodexCredentialIsReadableWithoutExposingValues() throws {
         let slot = try XCTUnwrap(AccountSlot.configured.first { $0.provider == .codex })
         let loaded = CredentialStore().load(slot)

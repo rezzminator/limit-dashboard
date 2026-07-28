@@ -25,6 +25,10 @@ struct VertexReport: Equatable, Sendable {
     let totals: VertexTokenTotals
     let pricingSource: String
     let pricingWarnings: [String]
+
+    var hasChartActivity: Bool {
+        series.points.contains { $0.value > 0 }
+    }
 }
 
 enum VertexReportError: LocalizedError {
@@ -46,19 +50,19 @@ enum VertexReportError: LocalizedError {
 
 struct VertexReportService: Sendable {
     static let refreshInterval: TimeInterval = 15 * 60
+    static let dashboardArguments = [
+        "--chart-last", "30d",
+        "--chart-interval", "1d",
+        "--summary-last", "30d",
+        "--timezone", "local",
+        "--json",
+    ]
 
     func fetch() throws -> VertexReport {
         let scriptURL = try scriptLocation()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [
-            scriptURL.path,
-            "--chart-last", "8h",
-            "--chart-interval", "20m",
-            "--summary-last", "30d",
-            "--timezone", "local",
-            "--json",
-        ]
+        process.arguments = [scriptURL.path] + Self.dashboardArguments
 
         var environment = ProcessInfo.processInfo.environment
         let existingPath = environment["PATH"] ?? "/usr/bin:/bin"

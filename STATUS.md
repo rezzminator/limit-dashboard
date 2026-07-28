@@ -61,11 +61,20 @@ The app now:
 Manual refresh alone shows activity in the footer. Automatic refresh remains
 20 seconds by default and does not animate numeric fields or the card grid.
 
+The visual pass keeps native SwiftUI materials while strengthening hierarchy
+with a compact dashboard mark, section icons, refined gradient borders,
+provider-tinted account surfaces, chart plot backgrounds, and quieter metric
+tiles. It adds no animation and changes no data semantics or interaction.
+
 ## Local historical and Vertex charts
 
-- A Swift Charts panel at the top renders four stable, differently colored
-  series for each account card's primary Remaining percentage on the left
-  axis, plus the Vertex token-total series on a distinct right token axis.
+- A dedicated Swift Charts panel renders four stable, differently colored
+  series for each account card's primary Remaining percentage. It is explicitly
+  labeled quota-history snapshots, not token usage.
+- A second, clearly separate chart renders actual Vertex Cloud Monitoring token
+  totals for the last 30 days in one-day sum buckets on a token axis.
+- If every Vertex bucket is zero, the zero line remains visible and the panel
+  says that no tokens were reported and zero is a valid measurement.
 - Refreshes record all available quota windows in a local SQLite database and
   read five-minute primary-limit averages for the last 24 hours.
 - The chart uses an explicit 24-hour x-domain. It plots only saved rows and
@@ -82,10 +91,10 @@ Manual refresh alone shows activity in the footer. Automatic refresh remains
 - History changes publish only the equatable chart view; unchanged equatable
   account cards retain their SwiftUI identity.
 - The database currently contains primary rows for all four stable slot IDs.
-- Vertex contributes its last 8 hours of 20-minute sum buckets to the shared
-  chart. The separate full-width Vertex card is summary-only: input, output,
-  total tokens, and the independent 30-day estimated spend. No cache metric or
-  cache-availability message appears in that card.
+- Vertex is never normalized or overlaid on the quota-percent chart. Its chart
+  and summary row are one full-width card, with input, output, total tokens,
+  and the independent 30-day estimated spend directly under the plot. No cache
+  metric or cache-availability message appears in that card.
 - The four account cards are content-height, fixed-height cards. Unused window
   space is outside the cards and remains at the bottom of the window.
 
@@ -129,7 +138,7 @@ Accessibility inspection after opening and after an automatic refresh returned
 ## Verification
 
 - Release build: passed.
-- Swift tests: 13 executed, 12 passed and 1 opt-in live test skipped by default.
+- Swift tests: 15 executed, 14 passed and 1 opt-in live test skipped by default.
 - Opt-in live Codex integration test: passed.
 - App signature and `Info.plist`: passed.
 - Binary linkage check: no Security framework.
@@ -139,7 +148,7 @@ Accessibility inspection after opening and after an automatic refresh returned
   states, the corrected first account, the second account at 73% seven-day
   Used, the matching third account at 91% seven-day Used, remaining-first
   headlines, the persisted interval control, Claude Fable usage, live Codex
-  state, the shared four-series quota/Vertex chart with distinct axes, and the
+  state, distinct quota-snapshot and 30-day Vertex-token charts, and the
   summary-only full-width Vertex estimate card.
 - Automatic-refresh render: before/after captures showed no loading replacement
   or layout/card redraw; only the freshness text advanced.
@@ -191,3 +200,21 @@ Monitoring API for project `freudche`.
 
 The EUR result is not an exact bill. Exact exported spend remains blocked by
 the empty Cloud Billing export dataset described above.
+
+## Official historical-usage research
+
+- OpenAI documents `account/usage/read` in Codex app-server. It returns
+  authenticated ChatGPT token-activity summaries and optional daily buckets.
+  The interactive Codex CLI also supports `/usage daily`, `weekly`, and
+  `cumulative`. A separate Codex Analytics API covers aggregated ChatGPT
+  workspace reporting. These are supported surfaces; private dashboard
+  scraping is unnecessary.
+- Anthropic documents Claude Code `/usage` (with `/cost` and `/stats` aliases)
+  and `~/.claude/stats-cache.json` as the local aggregated totals it displays.
+  For organizations, the Claude Code Analytics Admin API returns daily
+  per-user token/cost metrics, and Claude Enterprise has a separate Analytics
+  API. Anthropic states that organization analytics are not available to
+  individual Pro or Max plans; no documented individual-subscription network
+  API for historical token buckets was found.
+- No OpenAI or Anthropic history integration was added in this revision, and
+  no credential or provider endpoint behavior changed.

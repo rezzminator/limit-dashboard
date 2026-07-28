@@ -31,8 +31,13 @@ struct DashboardView: View {
 
                 HistoryChart(
                     series: model.historySeries,
-                    error: model.historyError,
-                    vertexReport: model.vertexReport
+                    error: model.historyError
+                )
+                .equatable()
+
+                VertexCard(
+                    report: model.vertexReport,
+                    error: model.vertexError
                 )
                 .equatable()
 
@@ -46,12 +51,6 @@ struct DashboardView: View {
                         AccountCard(snapshot: model.snapshots[3]).equatable()
                     }
                 }
-
-                VertexSummaryCard(
-                    report: model.vertexReport,
-                    error: model.vertexError
-                )
-                .equatable()
 
                 Spacer(minLength: 0)
 
@@ -80,13 +79,34 @@ struct DashboardView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Account limits")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
-                Text("One quiet view of every local subscription.")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.accentColor.opacity(0.95),
+                                    Color.cyan.opacity(0.64),
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Image(systemName: "gauge.with.dots.needle.67percent")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 44, height: 44)
+                .shadow(color: Color.accentColor.opacity(0.24), radius: 10, y: 4)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Account limits")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text("One quiet view of every local subscription.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
@@ -175,6 +195,10 @@ private struct HeaderStat: View {
         }
         .frame(width: 58, height: 48)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.white.opacity(0.10))
+        }
     }
 }
 
@@ -202,15 +226,69 @@ private struct IssueBanner: View {
     }
 }
 
+private struct PanelSurface: ViewModifier {
+    let accent: Color
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(
+            cornerRadius: cornerRadius,
+            style: .continuous
+        )
+
+        content
+            .background {
+                ZStack {
+                    shape.fill(.thinMaterial)
+                    shape.fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.035),
+                                accent.opacity(0.045),
+                                Color.clear,
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                }
+            }
+            .overlay {
+                shape.stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.16),
+                            accent.opacity(0.16),
+                            Color.white.opacity(0.055),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+            }
+            .shadow(color: Color.black.opacity(0.13), radius: 14, y: 7)
+    }
+}
+
+private extension View {
+    func panelSurface(
+        accent: Color,
+        cornerRadius: CGFloat = 16
+    ) -> some View {
+        modifier(
+            PanelSurface(accent: accent, cornerRadius: cornerRadius)
+        )
+    }
+}
+
 private struct HistoryChart: View, Equatable {
     let series: [ChartSeries]
     let error: String?
-    let vertexReport: VertexReport?
 
     nonisolated static func == (lhs: HistoryChart, rhs: HistoryChart) -> Bool {
         lhs.series == rhs.series
             && lhs.error == rhs.error
-            && lhs.vertexReport == rhs.vertexReport
     }
 
     private var hasPoints: Bool {
@@ -232,181 +310,114 @@ private struct HistoryChart: View, Equatable {
         )
     }
 
-    private var sharedEnd: Date {
-        max(historyEnd, vertexReport?.chartEnd ?? historyEnd)
-    }
-
-    private var sharedStart: Date {
-        sharedEnd.addingTimeInterval(-HistoryStore.chartWindow)
-    }
-
-    private var vertexAxisMax: Double {
-        max(1, vertexReport?.series.points.map(\.value).max() ?? 0)
-    }
-
-    private var hasChartData: Bool {
-        hasPoints || vertexReport?.series.points.isEmpty == false
+    private var historyStart: Date {
+        historyEnd.addingTimeInterval(-HistoryStore.chartWindow)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Quota history")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                    if let error {
-                        Text(error)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.orange)
-                    } else if let firstMeasurement {
-                        Text(
-                            "Saved snapshots only · begins \(firstMeasurement, style: .time)"
-                        )
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    } else {
-                        Text("No saved measurements yet")
+                HStack(spacing: 8) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.indigo)
+                        .frame(width: 26, height: 26)
+                        .background(Color.indigo.opacity(0.12), in: Circle())
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Quota history")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                        if let error {
+                            Text(error)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.orange)
+                        } else if let firstMeasurement {
+                            Text(
+                                "Saved snapshots only · begins \(firstMeasurement, style: .time)"
+                            )
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
+                        } else {
+                            Text("No saved measurements yet")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Spacer()
                 historyLegend
             }
 
-            quotaPanel
-        }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 10)
-        .frame(height: 130)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.10))
-        }
-    }
-
-    private var quotaPanel: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("PRIMARY REMAINING % · LEFT AXIS · VERTEX TOKENS · RIGHT AXIS · 24H")
+            Text("PRIMARY QUOTA REMAINING SNAPSHOTS · 24H")
                 .font(.system(size: 8, weight: .heavy))
                 .tracking(0.6)
                 .foregroundStyle(.secondary)
 
-            if hasChartData {
-                HStack(spacing: 5) {
-                    Chart {
-                        ForEach(series) { account in
-                            ForEach(account.points) { point in
-                                LineMark(
-                                    x: .value("Time", point.timestamp),
-                                    y: .value("Remaining", point.value),
-                                    series: .value("Account", account.id)
-                                )
-                                .foregroundStyle(color(for: account.id))
-                                .lineStyle(.init(lineWidth: 2))
-                                .interpolationMethod(.linear)
-
-                                PointMark(
-                                    x: .value("Time", point.timestamp),
-                                    y: .value("Remaining", point.value)
-                                )
-                                .foregroundStyle(color(for: account.id))
-                                .symbolSize(18)
-                            }
-                        }
-                    }
-                    .chartYScale(domain: 0...100)
-                    .chartXScale(domain: sharedStart...sharedEnd)
-                    .chartYAxis {
-                        AxisMarks(position: .leading, values: [0, 50, 100]) { value in
-                            AxisGridLine()
-                                .foregroundStyle(Color.secondary.opacity(0.12))
-                            AxisValueLabel {
-                                if let percent = value.as(Int.self) {
-                                    Text("\(percent)%")
-                                }
-                            }
-                        }
-                    }
-                    .chartXAxis {
-                        AxisMarks(values: .automatic(desiredCount: 6)) {
-                            AxisGridLine()
-                                .foregroundStyle(Color.secondary.opacity(0.08))
-                            AxisValueLabel(format: .dateTime.hour().minute())
-                        }
-                    }
-                    .chartLegend(.hidden)
-                    .chartOverlay { proxy in
-                        GeometryReader { geometry in
-                            if let plotFrame = proxy.plotFrame,
-                               let report = vertexReport {
-                                let frame = geometry[plotFrame]
-                                Canvas { context, _ in
-                                    var path = Path()
-                                    var started = false
-                                    for point in report.series.points
-                                        where point.timestamp >= sharedStart
-                                            && point.timestamp <= sharedEnd {
-                                        guard let x = proxy.position(
-                                            forX: point.timestamp
-                                        ) else { continue }
-                                        let normalized = min(
-                                            1,
-                                            max(0, point.value / vertexAxisMax)
-                                        )
-                                        let position = CGPoint(
-                                            x: x,
-                                            y: frame.height * (1 - normalized)
-                                        )
-                                        if started {
-                                            path.addLine(to: position)
-                                        } else {
-                                            path.move(to: position)
-                                            started = true
-                                        }
-                                    }
-                                    context.stroke(
-                                        path,
-                                        with: .color(.blue),
-                                        style: StrokeStyle(
-                                            lineWidth: 2.2,
-                                            lineCap: .round,
-                                            lineJoin: .round
-                                        )
-                                    )
-                                }
-                                .frame(width: frame.width, height: frame.height)
-                                .offset(x: frame.minX, y: frame.minY)
-                                .allowsHitTesting(false)
-                            }
-                        }
-                    }
-
-                    VStack(alignment: .trailing, spacing: 0) {
-                        Text(compactTokens(Int64(vertexAxisMax.rounded())))
-                        Spacer()
-                        if vertexAxisMax > 1 {
-                            Text(
-                                compactTokens(
-                                    Int64((vertexAxisMax / 2).rounded())
-                                )
+            if hasPoints {
+                Chart {
+                    ForEach(series) { account in
+                        ForEach(account.points) { point in
+                            LineMark(
+                                x: .value("Time", point.timestamp),
+                                y: .value("Remaining", point.value),
+                                series: .value("Account", account.id)
                             )
+                            .foregroundStyle(color(for: account.id))
+                            .lineStyle(.init(lineWidth: 2.2, lineCap: .round))
+                            .interpolationMethod(.linear)
+
+                            PointMark(
+                                x: .value("Time", point.timestamp),
+                                y: .value("Remaining", point.value)
+                            )
+                            .foregroundStyle(color(for: account.id))
+                            .symbolSize(18)
                         }
-                        Spacer()
-                        Text("0")
                     }
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40)
+                }
+                .chartYScale(domain: 0...100)
+                .chartXScale(domain: historyStart...historyEnd)
+                .chartYAxis {
+                    AxisMarks(position: .leading, values: [0, 50, 100]) { value in
+                        AxisGridLine()
+                            .foregroundStyle(Color.secondary.opacity(0.12))
+                        AxisValueLabel {
+                            if let percent = value.as(Int.self) {
+                                Text("\(percent)%")
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 6)) {
+                        AxisGridLine()
+                            .foregroundStyle(Color.secondary.opacity(0.08))
+                        AxisValueLabel(format: .dateTime.hour().minute())
+                    }
+                }
+                .chartLegend(.hidden)
+                .chartPlotStyle { plotArea in
+                    plotArea
+                        .background(Color.white.opacity(0.018))
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
                 }
             } else {
                 Text("History begins with local refresh snapshots.")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: .center
+                    )
             }
         }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 10)
+        .frame(height: 138)
+        .panelSurface(accent: .indigo)
     }
 
     private var historyLegend: some View {
@@ -420,17 +431,6 @@ private struct HistoryChart: View, Equatable {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
                     .lineLimit(1)
-                }
-            }
-            if vertexReport != nil {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Color.blue)
-                        .frame(width: 6, height: 6)
-                    Text("Vertex AI tokens · right axis")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
                 }
             }
         }
@@ -448,9 +448,214 @@ private struct HistoryChart: View, Equatable {
             Color(red: 0.16, green: 0.78, blue: 0.63)
         }
     }
+}
 
-    private func compactTokens(_ value: Int64) -> String {
-        value.formatted(
+private struct VertexCard: View, Equatable {
+    let report: VertexReport?
+    let error: String?
+
+    nonisolated static func == (
+        lhs: VertexCard,
+        rhs: VertexCard
+    ) -> Bool {
+        lhs.report == rhs.report && lhs.error == rhs.error
+    }
+
+    private var axisMaximum: Double {
+        max(1, report?.series.points.map(\.value).max() ?? 0)
+    }
+
+    private var hasReportedActivity: Bool {
+        report?.hasChartActivity == true
+    }
+
+    private var axisDomain: ClosedRange<Double> {
+        hasReportedActivity ? 0...axisMaximum : -0.08...1
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.blue)
+                            .frame(width: 26, height: 26)
+                            .background(Color.blue.opacity(0.12), in: Circle())
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Vertex AI token usage")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                            Text(statusText)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(statusColor)
+                        }
+                    }
+                    Spacer()
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.blue)
+                            .frame(width: 6, height: 6)
+                        Text("Token totals · daily buckets")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text(chartWindowLabel)
+                    .font(.system(size: 8, weight: .heavy))
+                    .tracking(0.6)
+                    .foregroundStyle(.secondary)
+
+                if let report, !report.series.points.isEmpty {
+                    Chart(report.series.points) { point in
+                        AreaMark(
+                            x: .value("Time", point.timestamp),
+                            y: .value("Tokens", point.value)
+                        )
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    Color.blue.opacity(0.28),
+                                    Color.blue.opacity(0.02),
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .interpolationMethod(.linear)
+
+                        LineMark(
+                            x: .value("Time", point.timestamp),
+                            y: .value("Tokens", point.value)
+                        )
+                        .foregroundStyle(Color.blue)
+                        .lineStyle(.init(lineWidth: 2.4, lineCap: .round))
+                        .interpolationMethod(.linear)
+
+                        PointMark(
+                            x: .value("Time", point.timestamp),
+                            y: .value("Tokens", point.value)
+                        )
+                        .foregroundStyle(Color.blue)
+                        .symbolSize(hasReportedActivity ? 12 : 20)
+                    }
+                    .chartXScale(domain: report.chartStart...report.chartEnd)
+                    .chartYScale(domain: axisDomain)
+                    .chartYAxis {
+                        if hasReportedActivity {
+                            AxisMarks(
+                                position: .leading,
+                                values: .automatic(desiredCount: 3)
+                            ) { value in
+                                AxisGridLine()
+                                    .foregroundStyle(Color.secondary.opacity(0.12))
+                                AxisValueLabel {
+                                    if let tokens = value.as(Double.self) {
+                                        Text(compactTokens(tokens))
+                                    }
+                                }
+                            }
+                        } else {
+                            AxisMarks(position: .leading, values: [0]) {
+                                AxisGridLine()
+                                    .foregroundStyle(Color.secondary.opacity(0.12))
+                                AxisValueLabel("0")
+                            }
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: .automatic(desiredCount: 6)) {
+                            AxisGridLine()
+                                .foregroundStyle(Color.secondary.opacity(0.08))
+                            AxisValueLabel(format: .dateTime.month().day())
+                        }
+                    }
+                    .chartLegend(.hidden)
+                    .chartPlotStyle { plotArea in
+                        plotArea
+                            .background(Color.blue.opacity(0.025))
+                            .clipShape(
+                                RoundedRectangle(
+                                    cornerRadius: 8,
+                                    style: .continuous
+                                )
+                            )
+                    }
+                } else {
+                    Text(error ?? "Loading actual Cloud Monitoring token buckets…")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(error == nil ? Color.secondary : Color.orange)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: .center
+                        )
+                }
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 10)
+            .frame(height: 146)
+
+            Divider()
+                .overlay(Color.white.opacity(0.10))
+                .padding(.horizontal, 13)
+
+            VertexSummarySection(report: report, error: error)
+        }
+        .frame(height: 225)
+        .panelSurface(accent: .blue)
+    }
+
+    private var statusText: String {
+        if let error {
+            return error
+        }
+        guard report != nil else {
+            return "Reading local authenticated Cloud Monitoring data"
+        }
+        if !hasReportedActivity {
+            return "No tokens reported in this window · zero is a valid measurement"
+        }
+        return "Actual Cloud Monitoring token totals"
+    }
+
+    private var statusColor: Color {
+        if error != nil {
+            return .orange
+        }
+        return .secondary
+    }
+
+    private var chartWindowLabel: String {
+        guard let report else {
+            return "VERTEX TOKEN TOTALS"
+        }
+        return "VERTEX TOKEN TOTALS · \(durationLabel(from: report.chartStart, to: report.chartEnd)) · \(durationLabel(seconds: report.chartBucketSeconds)) SUM BUCKETS"
+    }
+
+    private func durationLabel(from start: Date, to end: Date) -> String {
+        durationLabel(
+            seconds: max(0, Int(end.timeIntervalSince(start).rounded()))
+        )
+    }
+
+    private func durationLabel(seconds: Int) -> String {
+        if seconds.isMultiple(of: 86_400) {
+            return "\(seconds / 86_400)D"
+        }
+        if seconds.isMultiple(of: 3_600) {
+            return "\(seconds / 3_600)H"
+        }
+        if seconds.isMultiple(of: 60) {
+            return "\(seconds / 60)M"
+        }
+        return "\(seconds)S"
+    }
+
+    private func compactTokens(_ value: Double) -> String {
+        Int64(value.rounded()).formatted(
             .number
                 .notation(.compactName)
                 .precision(.fractionLength(0...1))
@@ -458,16 +663,9 @@ private struct HistoryChart: View, Equatable {
     }
 }
 
-private struct VertexSummaryCard: View, Equatable {
+private struct VertexSummarySection: View {
     let report: VertexReport?
     let error: String?
-
-    nonisolated static func == (
-        lhs: VertexSummaryCard,
-        rhs: VertexSummaryCard
-    ) -> Bool {
-        lhs.report == rhs.report && lhs.error == rhs.error
-    }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -532,14 +730,6 @@ private struct VertexSummaryCard: View, Equatable {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
         .frame(height: 78)
-        .background(
-            .thinMaterial,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.10))
-        }
     }
 
     private var summaryWindowLabel: String {
@@ -589,7 +779,21 @@ private struct VertexMetric: View {
         .frame(width: 116, alignment: .leading)
         .padding(.horizontal, 9)
         .padding(.vertical, 7)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+        .background(
+            LinearGradient(
+                colors: [
+                    Color.blue.opacity(0.11),
+                    Color.secondary.opacity(0.055),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.blue.opacity(0.12))
+        }
     }
 }
 
@@ -675,18 +879,7 @@ private struct AccountCard: View, Equatable {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .frame(height: cardHeight, alignment: .topLeading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.16), accent.opacity(0.14)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        }
-        .shadow(color: Color.black.opacity(0.14), radius: 20, y: 8)
+        .panelSurface(accent: accent, cornerRadius: 18)
     }
 
     private var loadingContent: some View {
@@ -805,6 +998,10 @@ private struct RefreshIntervalControl: View {
         .padding(.horizontal, 10)
         .frame(height: 48)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.white.opacity(0.10))
+        }
         .help("Automatic refresh interval: 10–3600 seconds. The choice is saved.")
         .onAppear {
             intervalFieldFocused = false
