@@ -66,6 +66,15 @@ with a compact dashboard mark, section icons, refined gradient borders,
 provider-tinted account surfaces, chart plot backgrounds, and quieter metric
 tiles. It adds no animation and changes no data semantics or interaction.
 
+Both chart cards now use compact, bounded, Dynamic Type-aware heights instead
+of expanding to consume the window. The account cards are only slightly taller
+to accommodate the larger semantic text styles. Extra height is left as
+intentional whitespace above the footer rather than padded into the cards.
+
+Visible dashboard text now uses semantic SwiftUI text styles and scaled layout
+metrics. Key totals are larger, supporting copy remains clearly subordinate,
+and long account identities tighten or scale before truncating.
+
 ## Local historical and Vertex charts
 
 - A dedicated Swift Charts panel renders four stable, differently colored

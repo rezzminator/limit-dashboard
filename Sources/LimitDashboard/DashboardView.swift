@@ -6,6 +6,8 @@ struct DashboardView: View {
     @ObservedObject var model: DashboardModel
     @AppStorage("refreshIntervalSeconds") private var refreshIntervalSeconds =
         RefreshPolicy.defaultSeconds
+    @ScaledMetric(relativeTo: .body) private var minimumDashboardHeight: CGFloat =
+        868
 
     private var validatedInterval: Int {
         RefreshPolicy.validated(refreshIntervalSeconds)
@@ -52,13 +54,18 @@ struct DashboardView: View {
                     }
                 }
 
-                Spacer(minLength: 0)
+                Spacer(minLength: 12)
 
                 footer
             }
             .padding(14)
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .topLeading
+            )
         }
-        .frame(minWidth: 920, minHeight: 720)
+        .frame(minWidth: 920, minHeight: minimumDashboardHeight)
         .background(WindowFocusResetter())
         .onAppear {
             refreshIntervalSeconds = validatedInterval
@@ -93,7 +100,7 @@ struct DashboardView: View {
                             )
                         )
                     Image(systemName: "gauge.with.dots.needle.67percent")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
                 }
                 .frame(width: 44, height: 44)
@@ -101,10 +108,16 @@ struct DashboardView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Account limits")
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .font(
+                            .system(
+                                .largeTitle,
+                                design: .rounded,
+                                weight: .bold
+                            )
+                        )
                         .foregroundStyle(.primary)
                     Text("One quiet view of every local subscription.")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.body.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -119,7 +132,7 @@ struct DashboardView: View {
                 Task { await model.refresh(showActivity: true) }
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .frame(minWidth: 82)
             }
             .buttonStyle(.borderedProminent)
@@ -133,18 +146,18 @@ struct DashboardView: View {
             Image(systemName: "lock.shield")
                 .foregroundStyle(.secondary)
             Text("Codex stays local; Claude reads cached profile snapshots only.")
-                .font(.system(size: 12, weight: .medium))
+                .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
             Spacer()
             if model.isRefreshing {
                 ProgressView()
                     .controlSize(.small)
                 Text("Refreshing")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.callout.weight(.medium))
                     .foregroundStyle(.secondary)
             } else if let lastUpdated = model.lastUpdated {
                 Text("Updated \(lastUpdated, style: .relative)")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.callout.weight(.medium))
                     .foregroundStyle(.secondary)
             }
         }
@@ -187,9 +200,9 @@ private struct HeaderStat: View {
     var body: some View {
         VStack(spacing: 1) {
             Text(value)
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(.system(.title2, design: .rounded, weight: .bold))
             Text(label.uppercased())
-                .font(.system(size: 9, weight: .bold))
+                .font(.caption.weight(.bold))
                 .tracking(0.8)
                 .foregroundStyle(.secondary)
         }
@@ -210,10 +223,10 @@ private struct IssueBanner: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(text)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.body.weight(.semibold))
             Spacer()
             Text("Cards below explain what needs attention.")
-                .font(.system(size: 12, weight: .medium))
+                .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 15)
@@ -285,6 +298,9 @@ private extension View {
 private struct HistoryChart: View, Equatable {
     let series: [ChartSeries]
     let error: String?
+    @ScaledMetric(relativeTo: .body) private var minimumHeight: CGFloat = 125
+    @ScaledMetric(relativeTo: .body) private var idealHeight: CGFloat = 145
+    @ScaledMetric(relativeTo: .body) private var maximumHeight: CGFloat = 155
 
     nonisolated static func == (lhs: HistoryChart, rhs: HistoryChart) -> Bool {
         lhs.series == rhs.series
@@ -319,27 +335,33 @@ private struct HistoryChart: View, Equatable {
             HStack(alignment: .firstTextBaseline) {
                 HStack(spacing: 8) {
                     Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(Color.indigo)
                         .frame(width: 26, height: 26)
                         .background(Color.indigo.opacity(0.12), in: Circle())
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Quota history")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .font(
+                                .system(
+                                    .title3,
+                                    design: .rounded,
+                                    weight: .bold
+                                )
+                            )
                         if let error {
                             Text(error)
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.callout.weight(.semibold))
                                 .foregroundStyle(.orange)
                         } else if let firstMeasurement {
                             Text(
                                 "Saved snapshots only · begins \(firstMeasurement, style: .time)"
                             )
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.callout.weight(.medium))
                             .foregroundStyle(.secondary)
                         } else {
                             Text("No saved measurements yet")
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.callout.weight(.medium))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -349,7 +371,7 @@ private struct HistoryChart: View, Equatable {
             }
 
             Text("PRIMARY QUOTA REMAINING SNAPSHOTS · 24H")
-                .font(.system(size: 8, weight: .heavy))
+                .font(.caption2.weight(.heavy))
                 .tracking(0.6)
                 .foregroundStyle(.secondary)
 
@@ -405,7 +427,7 @@ private struct HistoryChart: View, Equatable {
                 }
             } else {
                 Text("History begins with local refresh snapshots.")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.callout.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .frame(
                         maxWidth: .infinity,
@@ -416,7 +438,11 @@ private struct HistoryChart: View, Equatable {
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
-        .frame(height: 138)
+        .frame(
+            minHeight: minimumHeight,
+            idealHeight: idealHeight,
+            maxHeight: maximumHeight
+        )
         .panelSurface(accent: .indigo)
     }
 
@@ -428,9 +454,11 @@ private struct HistoryChart: View, Equatable {
                         .fill(color(for: account.id))
                         .frame(width: 6, height: 6)
                     Text(account.label)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .allowsTightening(true)
                 }
             }
         }
@@ -453,6 +481,9 @@ private struct HistoryChart: View, Equatable {
 private struct VertexCard: View, Equatable {
     let report: VertexReport?
     let error: String?
+    @ScaledMetric(relativeTo: .body) private var minimumHeight: CGFloat = 205
+    @ScaledMetric(relativeTo: .body) private var idealHeight: CGFloat = 225
+    @ScaledMetric(relativeTo: .body) private var maximumHeight: CGFloat = 245
 
     nonisolated static func == (
         lhs: VertexCard,
@@ -479,16 +510,22 @@ private struct VertexCard: View, Equatable {
                 HStack(alignment: .firstTextBaseline) {
                     HStack(spacing: 8) {
                         Image(systemName: "chart.xyaxis.line")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.body.weight(.semibold))
                             .foregroundStyle(Color.blue)
                             .frame(width: 26, height: 26)
                             .background(Color.blue.opacity(0.12), in: Circle())
 
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Vertex AI token usage")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .font(
+                                    .system(
+                                        .title3,
+                                        design: .rounded,
+                                        weight: .bold
+                                    )
+                                )
                             Text(statusText)
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.callout.weight(.semibold))
                                 .foregroundStyle(statusColor)
                         }
                     }
@@ -498,13 +535,13 @@ private struct VertexCard: View, Equatable {
                             .fill(Color.blue)
                             .frame(width: 6, height: 6)
                         Text("Token totals · daily buckets")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 Text(chartWindowLabel)
-                    .font(.system(size: 8, weight: .heavy))
+                    .font(.caption2.weight(.heavy))
                     .tracking(0.6)
                     .foregroundStyle(.secondary)
 
@@ -585,7 +622,7 @@ private struct VertexCard: View, Equatable {
                     }
                 } else {
                     Text(error ?? "Loading actual Cloud Monitoring token buckets…")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.callout.weight(.semibold))
                         .foregroundStyle(error == nil ? Color.secondary : Color.orange)
                         .frame(
                             maxWidth: .infinity,
@@ -596,7 +633,7 @@ private struct VertexCard: View, Equatable {
             }
             .padding(.horizontal, 13)
             .padding(.vertical, 10)
-            .frame(height: 146)
+            .frame(minHeight: 118, maxHeight: .infinity)
 
             Divider()
                 .overlay(Color.white.opacity(0.10))
@@ -604,7 +641,11 @@ private struct VertexCard: View, Equatable {
 
             VertexSummarySection(report: report, error: error)
         }
-        .frame(height: 225)
+        .frame(
+            minHeight: minimumHeight,
+            idealHeight: idealHeight,
+            maxHeight: maximumHeight
+        )
         .panelSurface(accent: .blue)
     }
 
@@ -666,14 +707,21 @@ private struct VertexCard: View, Equatable {
 private struct VertexSummarySection: View {
     let report: VertexReport?
     let error: String?
+    @ScaledMetric(relativeTo: .body) private var sectionHeight: CGFloat = 86
 
     var body: some View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Vertex AI summary")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(
+                        .system(
+                            .title3,
+                            design: .rounded,
+                            weight: .bold
+                        )
+                    )
                 Text(summaryWindowLabel)
-                    .font(.system(size: 8, weight: .heavy))
+                    .font(.caption2.weight(.heavy))
                     .tracking(0.6)
                     .foregroundStyle(.secondary)
             }
@@ -688,13 +736,25 @@ private struct VertexSummarySection: View {
                         Text(
                             "~€\(estimatedEUR, format: .number.precision(.fractionLength(2)))"
                         )
-                        .font(.system(size: 23, weight: .bold, design: .rounded))
+                        .font(
+                            .system(
+                                .title,
+                                design: .rounded,
+                                weight: .bold
+                            )
+                        )
                     } else {
                         Text("Unavailable")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .font(
+                                .system(
+                                    .title3,
+                                    design: .rounded,
+                                    weight: .bold
+                                )
+                            )
                     }
                     Text("estimated list price · not an invoice")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.orange)
                 }
                 .frame(width: 190, alignment: .leading)
@@ -721,7 +781,7 @@ private struct VertexSummarySection: View {
                 }
             } else {
                 Text(error ?? "Loading one local Monitoring summary…")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.callout.weight(.semibold))
                     .foregroundStyle(error == nil ? Color.secondary : Color.orange)
                     .frame(maxWidth: .infinity, alignment: .center)
             }
@@ -729,7 +789,7 @@ private struct VertexSummarySection: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
-        .frame(height: 78)
+        .frame(height: sectionHeight)
     }
 
     private var summaryWindowLabel: String {
@@ -763,20 +823,27 @@ private struct VertexSummarySection: View {
 private struct VertexMetric: View {
     let label: String
     let value: String
+    @ScaledMetric(relativeTo: .body) private var tileWidth: CGFloat = 122
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(value)
-                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .font(
+                    .system(
+                        .title3,
+                        design: .rounded,
+                        weight: .bold
+                    )
+                )
                 .lineLimit(1)
             Text(label)
-                .font(.system(size: 9, weight: .bold))
+                .font(.caption.weight(.bold))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(width: 116, alignment: .leading)
+        .frame(width: tileWidth, alignment: .leading)
         .padding(.horizontal, 9)
         .padding(.vertical, 7)
         .background(
@@ -799,6 +866,9 @@ private struct VertexMetric: View {
 
 private struct AccountCard: View, Equatable {
     let snapshot: AccountSnapshot
+    @ScaledMetric(relativeTo: .body) private var claudeCardHeight: CGFloat = 162
+    @ScaledMetric(relativeTo: .body) private var codexCardHeight: CGFloat = 124
+    @ScaledMetric(relativeTo: .body) private var unavailableCardHeight: CGFloat = 162
 
     nonisolated static func == (lhs: AccountCard, rhs: AccountCard) -> Bool {
         lhs.snapshot == rhs.snapshot
@@ -817,9 +887,11 @@ private struct AccountCard: View, Equatable {
     private var cardHeight: CGFloat {
         guard snapshot.state != .unavailable,
               snapshot.state != .quotaUnavailable else {
-            return 148
+            return unavailableCardHeight
         }
-        return snapshot.slot.provider == .claude ? 148 : 106
+        return snapshot.slot.provider == .claude
+            ? claudeCardHeight
+            : codexCardHeight
     }
 
     var body: some View {
@@ -830,13 +902,21 @@ private struct AccountCard: View, Equatable {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 7) {
                         Text(snapshot.slot.title)
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .font(
+                                .system(
+                                    .title3,
+                                    design: .rounded,
+                                    weight: .bold
+                                )
+                            )
                         PlanBadge(text: snapshot.plan)
                     }
                     Text(snapshot.identity)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .allowsTightening(true)
                 }
 
                 Spacer()
@@ -850,17 +930,17 @@ private struct AccountCard: View, Equatable {
                             )
                             .font(
                                 .system(
-                                    size: 24,
-                                    weight: .bold,
-                                    design: .rounded
+                                    .title,
+                                    design: .rounded,
+                                    weight: .bold
                                 )
                             )
                             Text("remaining")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                         }
                         Text(headlineWindow.usedLabel)
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -887,7 +967,7 @@ private struct AccountCard: View, Equatable {
             ProgressView()
                 .controlSize(.small)
             Text("Reading local session")
-                .font(.system(size: 11, weight: .medium))
+                .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
             RoundedRectangle(cornerRadius: 4)
                 .fill(Color.secondary.opacity(0.10))
@@ -917,11 +997,11 @@ private struct AccountCard: View, Equatable {
                         .fill(accent)
                         .frame(width: 5, height: 5)
                     Text(snapshot.state == .live ? "Provider confirmed" : "Local quota snapshot")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     if let resetAt = headline.resetAt {
                         Text("· resets \(compactReset(resetAt))")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -938,15 +1018,21 @@ private struct AccountCard: View, Equatable {
                 Text(snapshot.state == .quotaUnavailable
                      ? "Quota snapshot unavailable"
                      : "Session needs attention")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(
+                        .system(
+                            .title3,
+                            design: .rounded,
+                            weight: .bold
+                        )
+                    )
                 Text(snapshot.detail ?? "This account could not be refreshed.")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.callout.weight(.medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                 Text(snapshot.slot.provider == .claude
                      ? "Waiting for this account’s own local quota snapshot."
                      : "Open Codex and sign in again.")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(accent)
             }
         }
@@ -974,17 +1060,17 @@ private struct RefreshIntervalControl: View {
     var body: some View {
         HStack(spacing: 6) {
             Text("Every")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.callout.weight(.semibold))
                 .foregroundStyle(.secondary)
             TextField("20", value: $seconds, format: .number)
                 .focused($intervalFieldFocused)
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .font(.system(.body, design: .rounded, weight: .bold))
                 .frame(width: 48)
                 .accessibilityLabel("Automatic refresh interval in seconds")
             Text("sec")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.callout.weight(.semibold))
                 .foregroundStyle(.secondary)
             Stepper(
                 "Refresh interval",
@@ -1045,7 +1131,7 @@ private struct ProviderIcon: View {
                     )
                 )
             Image(systemName: provider == .claude ? "sparkles" : "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 15, weight: .bold))
+                .font(.body.weight(.bold))
                 .foregroundStyle(.white)
         }
         .frame(width: 36, height: 36)
@@ -1058,7 +1144,7 @@ private struct PlanBadge: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 8, weight: .heavy))
+            .font(.caption2.weight(.heavy))
             .tracking(0.6)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 7)
@@ -1086,7 +1172,7 @@ private struct StateBadge: View {
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(state.title)
-                .font(.system(size: 10, weight: .bold))
+                .font(.caption.weight(.bold))
         }
         .foregroundStyle(color)
         .padding(.horizontal, 8)
@@ -1098,13 +1184,16 @@ private struct StateBadge: View {
 private struct CompactLimitRow: View {
     let window: UsageWindow
     let accent: Color
+    @ScaledMetric(relativeTo: .caption) private var labelWidth: CGFloat = 52
+    @ScaledMetric(relativeTo: .caption) private var valueWidth: CGFloat = 168
+    @ScaledMetric(relativeTo: .caption) private var rowHeight: CGFloat = 19
 
     var body: some View {
         HStack(spacing: 8) {
             Text(window.title)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 48, alignment: .leading)
+                .frame(width: labelWidth, alignment: .leading)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule()
@@ -1119,23 +1208,28 @@ private struct CompactLimitRow: View {
             }
             .frame(height: 5)
             Text("\(window.usedLabel) · \(window.remainingLabel)")
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .frame(width: 158, alignment: .trailing)
+                .font(.system(.caption, design: .rounded, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .frame(width: valueWidth, alignment: .trailing)
         }
-        .frame(height: 16)
+        .frame(height: rowHeight)
     }
 }
 
 private struct CompactFableRow: View {
     let window: UsageWindow?
     let accent: Color
+    @ScaledMetric(relativeTo: .caption) private var labelWidth: CGFloat = 52
+    @ScaledMetric(relativeTo: .caption) private var valueWidth: CGFloat = 168
+    @ScaledMetric(relativeTo: .caption) private var rowHeight: CGFloat = 19
 
     var body: some View {
         HStack(spacing: 8) {
             Text("Fable")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 48, alignment: .leading)
+                .frame(width: labelWidth, alignment: .leading)
             if let window {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
@@ -1151,16 +1245,18 @@ private struct CompactFableRow: View {
                 }
                 .frame(height: 5)
                 Text("\(window.usedLabel) · \(window.remainingLabel)")
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .frame(width: 158, alignment: .trailing)
+                    .font(.system(.caption, design: .rounded, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .frame(width: valueWidth, alignment: .trailing)
             } else {
                 Spacer()
                 Text("Unavailable in local cache")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.caption.weight(.bold))
                     .foregroundStyle(.orange)
             }
         }
-        .frame(height: 16)
+        .frame(height: rowHeight)
     }
 }
 

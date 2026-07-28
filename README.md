@@ -23,6 +23,11 @@ The interface uses native SwiftUI materials, restrained provider accents,
 rounded system typography, and subtle static shadows. It contains no broad
 refresh animation or web-style navigation chrome.
 
+The quota and Vertex chart regions use bounded, Dynamic Type-aware heights.
+They grow only modestly and stop before dominating a tall window. Account cards
+are slightly taller for the larger text, while any remaining window space is
+left as intentional whitespace above the footer.
+
 ## Local history and Vertex charts
 
 The dashboard keeps unlike measurements in two separate chart boxes:
