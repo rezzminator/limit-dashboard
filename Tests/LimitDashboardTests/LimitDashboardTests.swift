@@ -7,6 +7,12 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(AccountSlot.configured.filter { $0.provider == .claude }.count, 3)
         XCTAssertEqual(AccountSlot.configured.filter { $0.provider == .codex }.count, 1)
         XCTAssertEqual(Set(AccountSlot.configured.map(\.id)).count, 4)
+        XCTAssertEqual(
+            AccountSlot.configured
+                .filter { $0.provider == .claude }
+                .map(\.title),
+            ["Claude Account 1", "Claude Account 2", "Claude Account 3"]
+        )
         XCTAssertTrue(
             AccountSlot.configured
                 .filter { $0.provider == .claude }
@@ -141,6 +147,118 @@ final class LimitDashboardTests: XCTestCase {
         )
     }
 
+    func testBenignRegistryRewriteKeepsFreshSlotTwoSampleWhenIdentityIsContinuous() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-claude-continuity-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let rateDirectory = directory.appendingPathComponent(
+            "rate-limits",
+            isDirectory: true
+        )
+        let backupsDirectory = directory.appendingPathComponent(
+            "backups",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: rateDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: backupsDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let harvestedAt = now.addingTimeInterval(-30)
+        let stateModifiedAt = now.addingTimeInterval(-10)
+        let sample = """
+        {
+          "acct": 2,
+          "five_hour_used": 13,
+          "seven_day_used": 84,
+          "five_hour_resets_at": \(now.addingTimeInterval(3_600).timeIntervalSince1970),
+          "seven_day_resets_at": \(now.addingTimeInterval(86_400).timeIntervalSince1970),
+          "ts": \(harvestedAt.timeIntervalSince1970)
+        }
+        """
+        try Data(sample.utf8).write(
+            to: rateDirectory.appendingPathComponent("acct-2.session.json")
+        )
+
+        func writeBackup(
+            named name: String,
+            accountID: String,
+            modifiedAt: Date
+        ) throws -> URL {
+            let file = backupsDirectory.appendingPathComponent(name)
+            let payload = """
+            {"oauthAccount":{"accountUuid":"\(accountID)"}}
+            """
+            try Data(payload.utf8).write(to: file)
+            try FileManager.default.setAttributes(
+                [.modificationDate: modifiedAt],
+                ofItemAtPath: file.path
+            )
+            return file
+        }
+
+        _ = try writeBackup(
+            named: ".claude.json.backup.before",
+            accountID: "account-two",
+            modifiedAt: harvestedAt.addingTimeInterval(-30)
+        )
+        let after = try writeBackup(
+            named: ".claude.json.backup.after",
+            accountID: "account-two",
+            modifiedAt: harvestedAt.addingTimeInterval(10)
+        )
+
+        let store = CredentialStore(
+            claudeRateLimitsDirectory: rateDirectory,
+            claudeBackupsDirectory: backupsDirectory
+        )
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.configured.first { $0.position == 1 }
+        )
+        let accepted = try XCTUnwrap(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                stateModifiedAt: stateModifiedAt,
+                currentAccountID: "account-two",
+                now: now
+            )
+        )
+        XCTAssertEqual(accepted.fiveHour?.usedPercent, 13)
+        XCTAssertEqual(accepted.sevenDay?.usedPercent, 84)
+
+        let changedAccount = """
+        {"oauthAccount":{"accountUuid":"different-account"}}
+        """
+        try Data(changedAccount.utf8).write(to: after)
+        try FileManager.default.setAttributes(
+            [.modificationDate: harvestedAt.addingTimeInterval(10)],
+            ofItemAtPath: after.path
+        )
+        XCTAssertNil(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                stateModifiedAt: stateModifiedAt,
+                currentAccountID: "account-two",
+                now: now
+            ),
+            "A real account change between harvest and the current registry must invalidate the sample."
+        )
+        XCTAssertTrue(
+            store.hasFreshClaudeRateLimitCandidate(
+                for: accountTwo,
+                now: now
+            ),
+            "The UI must distinguish a fresh-but-ambiguous sample from having no local source, so it can suppress the older cache."
+        )
+    }
+
     func testCanonicalClaudeStateRegistryUsesTheRootFileForAccountOne() {
         let claude = AccountSlot.configured.filter { $0.provider == .claude }
         XCTAssertEqual(
@@ -209,7 +327,7 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertNotEqual(first, nextPoll)
     }
 
-    func testHistoryStoreAggregatesPrimaryRemainingValuesWithoutIdentityData() throws {
+    func testHistoryStoreAggregatesPrimaryUsedValuesWithoutIdentityData() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "limit-dashboard-history-\(UUID().uuidString)",
             isDirectory: true
@@ -253,7 +371,7 @@ final class LimitDashboardTests: XCTestCase {
             [snapshot(usedPercent: 40)],
             at: start.addingTimeInterval(60)
         )
-        let points = try store.loadPrimaryPoints(
+        let points = try store.loadPrimaryUsedPoints(
             since: start.addingTimeInterval(-1),
             bucketSeconds: 300
         )
@@ -265,7 +383,7 @@ final class LimitDashboardTests: XCTestCase {
             start,
             "The plotted bucket must begin at its first real measurement, not the bucket boundary."
         )
-        XCTAssertEqual(points[0].value, 70, accuracy: 0.001)
+        XCTAssertEqual(points[0].value, 30, accuracy: 0.001)
         XCTAssertGreaterThan(
             points[0].timestamp,
             start.addingTimeInterval(-60 * 60),
@@ -282,6 +400,62 @@ final class LimitDashboardTests: XCTestCase {
         let databaseText = String(decoding: databaseBytes, as: UTF8.self)
         XCTAssertFalse(databaseText.contains("private-email@example.com"))
         XCTAssertFalse(databaseText.contains("provider-account-id"))
+    }
+
+    func testQuotaStateHistoryKeepsIdleClaudeAccountsAtZeroUsed() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-zero-quota-history-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = HistoryStore(
+            databaseURL: directory.appendingPathComponent("history.sqlite3")
+        )
+        let idleSlots = AccountSlot.configured.filter {
+            $0.id == "claude-gmail" || $0.id == "claude-khosravi"
+        }
+        XCTAssertEqual(idleSlots.count, 2)
+
+        let capturedAt = Date(timeIntervalSince1970: 1_900_000_000)
+        let snapshots = idleSlots.map { slot in
+            AccountSnapshot(
+                id: slot.id,
+                slot: slot,
+                identity: slot.configuredEmail ?? slot.localLabel,
+                plan: "Max",
+                state: .cached,
+                windows: [
+                    UsageWindow(
+                        id: "five-hour",
+                        title: "5-hour",
+                        usedPercent: 0,
+                        resetAt: nil
+                    ),
+                    UsageWindow(
+                        id: "seven-day",
+                        title: "7-day",
+                        usedPercent: 90,
+                        resetAt: nil
+                    ),
+                ],
+                fableUsage: nil,
+                providerAccountID: nil,
+                detail: nil,
+                refreshedAt: capturedAt,
+                duplicatePeer: nil
+            )
+        }
+        try store.record(snapshots, at: capturedAt)
+
+        let points = try store.loadPrimaryUsedPoints(
+            since: capturedAt.addingTimeInterval(-1)
+        )
+        XCTAssertEqual(points.count, 2)
+        XCTAssertTrue(points.allSatisfy { $0.value == 0 })
+        XCTAssertFalse(
+            points.contains { $0.value == 100 },
+            "A 100% remaining baseline must never be plotted as activity or quota used."
+        )
     }
 
     func testCachedClaudeFableUsageReadsExactWeeklyScopedEntry() throws {

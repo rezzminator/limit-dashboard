@@ -44,14 +44,17 @@ struct CredentialStore: Sendable {
 
     private static let statusLineSnapshotLifetime: TimeInterval = 60 * 60
     private let claudeRateLimitsDirectory: URL
+    private let claudeBackupsDirectoryOverride: URL?
 
     init(
         claudeRateLimitsDirectory: URL = URL(
             fileURLWithPath: "/tmp/cc-rate-limits",
             isDirectory: true
-        )
+        ),
+        claudeBackupsDirectory: URL? = nil
     ) {
         self.claudeRateLimitsDirectory = claudeRateLimitsDirectory
+        claudeBackupsDirectoryOverride = claudeBackupsDirectory
     }
 
     func load(_ slot: AccountSlot) -> LoadedCredential {
@@ -120,7 +123,8 @@ struct CredentialStore: Sendable {
             let stateModifiedAt,
             let statusLine = localClaudeRateLimits(
                 for: slot,
-                stateModifiedAt: stateModifiedAt
+                stateModifiedAt: stateModifiedAt,
+                currentAccountID: account?["accountUuid"] as? String
             )
         {
             windows = mergeClaudeWindows(
@@ -129,6 +133,13 @@ struct CredentialStore: Sendable {
             )
             fetchedAt = statusLine.harvestedAt
             snapshotDetail = "Claude Code status-line quota snapshot"
+        } else if hasFreshClaudeRateLimitCandidate(for: slot) {
+            return AccountSnapshot.quotaUnavailable(
+                slot,
+                identity: registryIdentity.preferredDisplay ?? slot.localLabel,
+                plan: plan,
+                detail: "A fresh local quota sample exists, but its account association could not be proven. Older cached percentages were not shown."
+            )
         }
 
         let providerAccountID = (account?["accountUuid"] as? String)
@@ -240,6 +251,7 @@ struct CredentialStore: Sendable {
     func localClaudeRateLimits(
         for slot: AccountSlot,
         stateModifiedAt: Date,
+        currentAccountID: String? = nil,
         now: Date = Date()
     ) -> ClaudeStatusLineRateLimits? {
         guard slot.provider == .claude else { return nil }
@@ -280,6 +292,12 @@ struct CredentialStore: Sendable {
                 age >= -60,
                 age <= Self.statusLineSnapshotLifetime,
                 harvestedAt >= stateModifiedAt
+                    || registryIdentityWasContinuous(
+                        for: slot,
+                        currentAccountID: currentAccountID,
+                        from: harvestedAt,
+                        through: stateModifiedAt
+                    )
             else {
                 return nil
             }
@@ -312,6 +330,127 @@ struct CredentialStore: Sendable {
             sevenDay: sevenDay,
             harvestedAt: harvestedAt
         )
+    }
+
+    func hasFreshClaudeRateLimitCandidate(
+        for slot: AccountSlot,
+        now: Date = Date()
+    ) -> Bool {
+        guard slot.provider == .claude else { return false }
+        let expectedSlot = slot.position + 1
+        guard
+            let files = try? FileManager.default.contentsOfDirectory(
+                at: claudeRateLimitsDirectory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+        else {
+            return false
+        }
+        let decoder = JSONDecoder()
+        return files.contains { file in
+            let expectedPrefix = "acct-\(expectedSlot)."
+            guard
+                file.lastPathComponent.hasPrefix(expectedPrefix),
+                file.pathExtension == "json",
+                let values = try? file.resourceValues(forKeys: [.isRegularFileKey]),
+                values.isRegularFile == true,
+                let data = try? Data(contentsOf: file, options: [.mappedIfSafe]),
+                let sample = try? decoder.decode(
+                    ClaudeStatusLineSample.self,
+                    from: data
+                ),
+                sample.accountSlot == expectedSlot,
+                (0...100).contains(sample.fiveHourUsed),
+                (0...100).contains(sample.sevenDayUsed)
+            else {
+                return false
+            }
+            let harvestedAt = Date(timeIntervalSince1970: sample.harvestedAt)
+            let age = now.timeIntervalSince(harvestedAt)
+            let hasActiveWindow =
+                Date(timeIntervalSince1970: sample.fiveHourResetsAt) > now
+                || Date(timeIntervalSince1970: sample.sevenDayResetsAt) > now
+            return age >= -60
+                && age <= Self.statusLineSnapshotLifetime
+                && hasActiveWindow
+        }
+    }
+
+    private func registryIdentityWasContinuous(
+        for slot: AccountSlot,
+        currentAccountID: String?,
+        from harvestedAt: Date,
+        through stateModifiedAt: Date
+    ) -> Bool {
+        guard
+            let currentAccountID,
+            !currentAccountID.isEmpty,
+            let backupsDirectory = claudeBackupsURL(for: slot),
+            let files = try? FileManager.default.contentsOfDirectory(
+                at: backupsDirectory,
+                includingPropertiesForKeys: [
+                    .contentModificationDateKey,
+                    .isRegularFileKey,
+                ],
+                options: []
+            )
+        else {
+            return false
+        }
+
+        var observations: [(date: Date, accountID: String)] = []
+        for file in files
+        where file.lastPathComponent.hasPrefix(".claude.json.backup.") {
+            guard
+                let values = try? file.resourceValues(
+                    forKeys: [
+                        .contentModificationDateKey,
+                        .isRegularFileKey,
+                    ]
+                ),
+                values.isRegularFile == true,
+                let modifiedAt = values.contentModificationDate,
+                modifiedAt <= stateModifiedAt,
+                let data = try? Data(contentsOf: file, options: [.mappedIfSafe]),
+                let root = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                let account = root["oauthAccount"] as? [String: Any],
+                let accountID = account["accountUuid"] as? String,
+                !accountID.isEmpty
+            else {
+                continue
+            }
+            observations.append((modifiedAt, accountID))
+        }
+
+        guard
+            let preceding = observations
+                .filter({ $0.date <= harvestedAt })
+                .max(by: { $0.date < $1.date }),
+            preceding.accountID == currentAccountID
+        else {
+            return false
+        }
+        return observations
+            .filter { $0.date > harvestedAt }
+            .allSatisfy { $0.accountID == currentAccountID }
+    }
+
+    private func claudeBackupsURL(for slot: AccountSlot) -> URL? {
+        if let claudeBackupsDirectoryOverride {
+            return claudeBackupsDirectoryOverride
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        if slot.position == 0 {
+            return home
+                .appendingPathComponent(".claude", isDirectory: true)
+                .appendingPathComponent("backups", isDirectory: true)
+        }
+        guard let stateURL = claudeStateURL(for: slot) else { return nil }
+        return stateURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("backups", isDirectory: true)
     }
 
     private func selectStatusLineWindow(

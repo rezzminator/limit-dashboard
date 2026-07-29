@@ -24,27 +24,30 @@ rounded system typography, and subtle static shadows. It contains no broad
 refresh animation or web-style navigation chrome.
 
 The quota and Vertex chart regions use bounded, Dynamic Type-aware heights.
-They grow only modestly and stop before dominating a tall window. Account cards
-are slightly taller for the larger text, while any remaining window space is
-left as intentional whitespace above the footer.
+They grow only modestly and stop before dominating a tall window. All four
+account cards share one equal, Dynamic Type-aware height, while any remaining
+window space is left as intentional whitespace above the footer.
 
 ## Local history and Vertex charts
 
 The dashboard keeps unlike measurements in two separate chart boxes:
 
-- **Quota history** plots the four account cards' primary Remaining percentages
+- **Quota window state** plots saved primary-window **Used quota percentages**
   over 24 hours. Claude uses its 5-hour window; Codex uses its primary weekly
-  window.
+  window. These are quota-state snapshots, not token counts or activity
+  inferred between refreshes.
 - **Vertex AI token usage** plots actual Cloud Monitoring token **sum totals**
   over the last 30 days in one-day buckets, on its own token axis. A visible
   zero line and explanatory status are shown when the provider reports no
   tokens in the window; zero usage is not treated as an error.
 
 The quota x-axis is always the full 24-hour range. Only actual SQLite
-measurements are plotted: the app does not synthesize, backfill, or carry a
-value backward before its first saved snapshot. Five-minute groups use the
-timestamp of their first real measurement, so a newly created history database
-leaves the earlier part of the chart blank.
+measurements are plotted from the stored `used_percent` column: the app does
+not synthesize, backfill, invert Remaining, or carry a value backward before
+its first saved snapshot. Five-minute groups use the timestamp of their first
+real measurement, so a newly created history database leaves the earlier part
+of the chart blank. An idle primary window stored as 0% Used stays at zero; its
+100% Remaining counterpart is never plotted as activity.
 
 The Vertex chart is fetched from Cloud Monitoring and is not persisted in the
 quota SQLite database. The two charts do not normalize or equate quota
@@ -85,9 +88,10 @@ Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
 - If the user's existing Claude Code status-line command has written a current
   snapshot under `/tmp/cc-rate-limits`, the app prefers its officially
   supported `rate_limits.five_hour` and `rate_limits.seven_day` values. A file
-  is accepted only for the matching config slot, for at most one hour, after
-  the authoritative account state file was last modified, and while its reset
-  window is still active.
+  is accepted only for the matching config slot, for at most one hour, and
+  while its reset window is still active. If the state file was rewritten after
+  harvest, the app requires the local registry backups to prove that the same
+  account identity remained assigned to that slot throughout.
 - Full account email addresses come from each file's
   `oauthAccount.emailAddress`, with the configured label used only if that
   field is absent. Tokens and other credential fields are never shown.

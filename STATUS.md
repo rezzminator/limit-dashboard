@@ -14,10 +14,10 @@ dashboard window.
 
 | Account | Dashboard source | Result |
 |---|---|---|
-| Claude — `mrez9090@gmail.com` | `~/.claude.json` | **Cached**: 0% used / 100% remaining in the 5-hour window, 90% used / 10% remaining in the 7-day window, and 97% used / 3% remaining in the weekly Fable limit. The first card now renders correctly. |
-| Claude — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` identity/Fable cache plus the fresh slot-2 `/tmp/cc-rate-limits` snapshot | **Local status-line snapshot**: 2% used / 98% remaining in the 5-hour window, **82% used / 18% remaining in the 7-day window**, and 26% used / 74% remaining in the cached weekly Fable limit. |
-| Claude — `reza@intuita.health` | `~/.claude3/.claude.json` | **Cached and matching**: 0% used / 100% remaining in the 5-hour window, 91% used / 9% remaining in the 7-day window, and 77% used / 23% remaining in the weekly Fable limit. |
-| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **92% remaining** / 8% used in the current weekly window during the latest render. |
+| Claude Account 1 — `mrez9090@gmail.com` | `~/.claude.json` | **Cached**: 0% used / 100% remaining in the 5-hour window, 90% used / 10% remaining in the 7-day window, and 97% used / 3% remaining in the weekly Fable limit. The first card now renders correctly. |
+| Claude Account 2 — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` identity/Fable cache plus the fresh slot-2 `/tmp/cc-rate-limits` snapshot | **Local status-line snapshot**: 13% used / 87% remaining in the 5-hour window, **84% used / 16% remaining in the 7-day window**, and 26% used / 74% remaining in the cached weekly Fable limit. |
+| Claude Account 3 — `reza@intuita.health` | `~/.claude3/.claude.json` | **Cached and matching**: 0% used / 100% remaining in the 5-hour window, 91% used / 9% remaining in the 7-day window, and 77% used / 23% remaining in the weekly Fable limit. |
+| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **85% remaining** / 15% used in the current weekly window during the latest render. |
 
 Claude cache availability can change as local provider sessions rotate. The
 dashboard re-reads all three files on every selected interval. It derives the
@@ -34,15 +34,29 @@ on 2026-07-28 at 17:34 local time.
 The user's existing Claude Code status line receives Anthropic's documented
 `rate_limits.five_hour.used_percentage` and
 `rate_limits.seven_day.used_percentage` fields. Its current slot-2 snapshot
-contains 82% seven-day Used. The dashboard previously ignored that supported
+contains 84% seven-day Used. The dashboard previously ignored that supported
 local source and therefore kept rendering the stale 73%.
 
 The app now prefers a status-line snapshot only when its slot number matches,
-it is no more than one hour old, it was harvested after the authoritative
-account state file was modified, and its provider reset window remains active.
-These checks prevent a stale pre-swap session from being attached to a newly
-registered account. The state file remains authoritative for the full email,
-account identity, plan, and cached Fable-specific limit.
+it is no more than one hour old, its provider reset window remains active, and
+the on-disk registry proves it belongs to the current slot identity. If a state
+file was harmlessly rewritten after harvest, the app checks the surrounding
+local registry backups for uninterrupted account identity rather than
+discarding the fresh sample based on whole-file modification time alone.
+These checks still reject a real account change. The state file remains
+authoritative for the full email, account identity, plan, and cached
+Fable-specific limit. When a fresh slot sample exists but continuity cannot be
+proven, the card reports quota unavailable and suppresses the older cached
+percentages instead of presenting them as current.
+
+The urgent regression was caused by the previous whole-file timestamp gate:
+the fresh slot-2 sample was harvested at 17:55 with 13% five-hour and 84%
+seven-day Used, then `.claude2/.claude.json` was rewritten at 18:04 without an
+account change. The app rejected the fresh sample and fell back to the old
+10%/73% cache. Backups immediately around both times contain the same current
+account identity. The new continuity check keeps 13%/84%, while a regression
+test verifies that an actual intervening account change yields no accepted
+sample.
 
 ## Rendering and mapping correction
 
@@ -95,9 +109,9 @@ provider-tinted account surfaces, chart plot backgrounds, and quieter metric
 tiles. It adds no animation and changes no data semantics or interaction.
 
 Both chart cards now use compact, bounded, Dynamic Type-aware heights instead
-of expanding to consume the window. The account cards are only slightly taller
-to accommodate the larger semantic text styles. Extra height is left as
-intentional whitespace above the footer rather than padded into the cards.
+of expanding to consume the window. All four account cards now share the same
+Dynamic Type-aware fixed height. Extra window height is left as intentional
+whitespace above the footer rather than making the charts dominate.
 
 Visible dashboard text now uses semantic SwiftUI text styles and scaled layout
 metrics. Key totals are larger, supporting copy remains clearly subordinate,
@@ -106,8 +120,11 @@ and long account identities tighten or scale before truncating.
 ## Local historical and Vertex charts
 
 - A dedicated Swift Charts panel renders four stable, differently colored
-  series for each account card's primary Remaining percentage. It is explicitly
-  labeled quota-history snapshots, not token usage.
+  series for each account card's saved primary-window Used percentage. It is
+  explicitly labeled quota-window state, not token activity.
+- Claude chart legends use the stable slot names `Claude Account 1`,
+  `Claude Account 2`, and `Claude Account 3`; full emails remain on their
+  corresponding cards rather than becoming chart labels.
 - A second, clearly separate chart renders actual Vertex Cloud Monitoring token
   totals for the last 30 days in one-day sum buckets on a token axis.
 - If every Vertex bucket is zero, the zero line remains visible and the panel
@@ -117,6 +134,10 @@ and long account identities tighten or scale before truncating.
 - The chart uses an explicit 24-hour x-domain. It plots only saved rows and
   leaves time before the first measurement blank; it does not synthesize,
   carry backward, or fill missing history with 100%.
+- The query reads SQLite `used_percent`, not `remaining_percent`. In the
+  audited live database, Claude Accounts 1 and 3 had 1,425 primary snapshots
+  with 0% Used throughout; both therefore plot at zero rather than displaying
+  their 100% Remaining baseline as a nonzero line.
 - Five-minute groups are positioned at the first actual measurement timestamp,
   not the earlier five-minute boundary. The live database began at
   approximately 18:07 local time and contained zero primary measurements an
@@ -132,8 +153,8 @@ and long account identities tighten or scale before truncating.
   and summary row are one full-width card, with input, output, total tokens,
   and the independent 30-day estimated spend directly under the plot. No cache
   metric or cache-availability message appears in that card.
-- The four account cards are content-height, fixed-height cards. Unused window
-  space is outside the cards and remains at the bottom of the window.
+- The four account cards use one equal fixed height. Unused window space is
+  outside the cards and remains at the bottom of the window.
 
 The refresh interval TextField is explicitly unfocused on appearance, and a
 one-time AppKit bridge clears the window's initial first responder. Runtime
@@ -177,14 +198,14 @@ Accessibility inspection after opening and after an automatic refresh returned
 ## Verification
 
 - Release build: passed.
-- Swift tests: 16 executed, 15 passed and 1 opt-in live test skipped by default.
+- Swift tests: 18 executed, 17 passed and 1 opt-in live test skipped by default.
 - Opt-in live Codex integration test: passed.
 - App signature and `Info.plist`: passed.
 - Binary linkage check: no Security framework.
 - Source audit: no `SecItem`, `kSec`, Claude Keychain service, or Anthropic
   endpoint path.
 - Window render: visually inspected with all four compact cards, full emails,
-  local states, the corrected first account, the second account at 82%
+  local states, the corrected first account, the second account at 84%
   seven-day Used from its fresh status-line snapshot, the matching third
   account at 91% seven-day Used, remaining-first headlines, the persisted
   interval control, Claude Fable usage, live Codex state, distinct

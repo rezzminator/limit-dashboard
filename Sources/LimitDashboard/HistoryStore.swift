@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 enum ChartUnit: String, Hashable, Sendable {
-    case percentRemaining
+    case percentUsed
     case tokens
 }
 
@@ -156,7 +156,7 @@ struct HistoryStore: Sendable {
         }
     }
 
-    func loadPrimaryPoints(
+    func loadPrimaryUsedPoints(
         since start: Date,
         bucketSeconds: Int = Self.chartBucketSeconds
     ) throws -> [ChartPoint] {
@@ -167,7 +167,7 @@ struct HistoryStore: Sendable {
                     slot_id,
                     CAST(captured_at / ? AS INTEGER) * ? AS bucket_key,
                     MIN(captured_at) AS first_measurement,
-                    AVG(remaining_percent)
+                    AVG(used_percent)
                 FROM quota_snapshots
                 WHERE is_primary = 1 AND captured_at >= ?
                 GROUP BY slot_id, bucket_key

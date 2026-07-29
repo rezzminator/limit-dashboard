@@ -9,8 +9,8 @@ final class DashboardModel: ObservableObject {
         AccountSlot.configured.map {
             ChartSeries(
                 id: $0.id,
-                label: $0.configuredEmail ?? $0.localLabel,
-                unit: .percentRemaining,
+                label: $0.title,
+                unit: .percentUsed,
                 points: []
             )
         }
@@ -97,7 +97,7 @@ final class DashboardModel: ObservableObject {
         ) { [historyStore, finalizedResults, capturedAt] in
             do {
                 try historyStore.record(finalizedResults, at: capturedAt)
-                let points = try historyStore.loadPrimaryPoints(
+                let points = try historyStore.loadPrimaryUsedPoints(
                     since: capturedAt.addingTimeInterval(-HistoryStore.chartWindow)
                 )
                 return HistoryRefreshResult.success(points)
@@ -107,7 +107,7 @@ final class DashboardModel: ObservableObject {
                 return HistoryRefreshResult.failure(message)
             }
         }.value
-        applyHistoryResult(historyResult, snapshots: finalizedResults)
+        applyHistoryResult(historyResult)
 
         let shouldFetchVertex = lastVertexAttempt.map {
             capturedAt.timeIntervalSince($0) >= VertexReportService.refreshInterval
@@ -142,21 +142,15 @@ final class DashboardModel: ObservableObject {
         }
     }
 
-    private func applyHistoryResult(
-        _ result: HistoryRefreshResult,
-        snapshots: [AccountSnapshot]
-    ) {
+    private func applyHistoryResult(_ result: HistoryRefreshResult) {
         switch result {
         case .success(let points):
             let grouped = Dictionary(grouping: points, by: \.seriesID)
             let nextSeries = AccountSlot.configured.map { slot in
-                let identity = snapshots.first(where: { $0.slot.id == slot.id })?.identity
-                    ?? slot.configuredEmail
-                    ?? slot.localLabel
                 return ChartSeries(
                     id: slot.id,
-                    label: identity,
-                    unit: .percentRemaining,
+                    label: slot.title,
+                    unit: .percentUsed,
                     points: grouped[slot.id] ?? []
                 )
             }

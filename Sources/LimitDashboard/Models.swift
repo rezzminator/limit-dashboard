@@ -45,7 +45,7 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
         AccountSlot(
             id: "claude-gmail",
             provider: .claude,
-            title: "Claude",
+            title: "Claude Account 1",
             localLabel: "account 1",
             configuredEmail: "mrez9090@gmail.com",
             claudeStatePath: ".claude.json",
@@ -54,7 +54,7 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
         AccountSlot(
             id: "claude-freudche",
             provider: .claude,
-            title: "Claude",
+            title: "Claude Account 2",
             localLabel: "account 2",
             configuredEmail: "reza.khosravivala@gmail.com",
             claudeStatePath: ".claude2/.claude.json",
@@ -63,7 +63,7 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
         AccountSlot(
             id: "claude-khosravi",
             provider: .claude,
-            title: "Claude",
+            title: "Claude Account 3",
             localLabel: "account 3",
             configuredEmail: "reza@intuita.health",
             claudeStatePath: ".claude3/.claude.json",

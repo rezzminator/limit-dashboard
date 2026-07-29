@@ -341,7 +341,7 @@ private struct HistoryChart: View, Equatable {
                         .background(Color.indigo.opacity(0.12), in: Circle())
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Quota history")
+                        Text("Quota window state")
                             .font(
                                 .system(
                                     .title3,
@@ -355,7 +355,7 @@ private struct HistoryChart: View, Equatable {
                                 .foregroundStyle(.orange)
                         } else if let firstMeasurement {
                             Text(
-                                "Saved snapshots only · begins \(firstMeasurement, style: .time)"
+                                "Saved used-% snapshots · not token activity · begins \(firstMeasurement, style: .time)"
                             )
                             .font(.callout.weight(.medium))
                             .foregroundStyle(.secondary)
@@ -370,7 +370,7 @@ private struct HistoryChart: View, Equatable {
                 historyLegend
             }
 
-            Text("PRIMARY QUOTA REMAINING SNAPSHOTS · 24H")
+            Text("PRIMARY WINDOW QUOTA USED · 24H")
                 .font(.caption2.weight(.heavy))
                 .tracking(0.6)
                 .foregroundStyle(.secondary)
@@ -381,7 +381,7 @@ private struct HistoryChart: View, Equatable {
                         ForEach(account.points) { point in
                             LineMark(
                                 x: .value("Time", point.timestamp),
-                                y: .value("Remaining", point.value),
+                                y: .value("Quota used", point.value),
                                 series: .value("Account", account.id)
                             )
                             .foregroundStyle(color(for: account.id))
@@ -390,7 +390,7 @@ private struct HistoryChart: View, Equatable {
 
                             PointMark(
                                 x: .value("Time", point.timestamp),
-                                y: .value("Remaining", point.value)
+                                y: .value("Quota used", point.value)
                             )
                             .foregroundStyle(color(for: account.id))
                             .symbolSize(18)
@@ -426,7 +426,7 @@ private struct HistoryChart: View, Equatable {
                         )
                 }
             } else {
-                Text("History begins with local refresh snapshots.")
+                Text("History begins with real local quota-state snapshots.")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .frame(
@@ -866,9 +866,7 @@ private struct VertexMetric: View {
 
 private struct AccountCard: View, Equatable {
     let snapshot: AccountSnapshot
-    @ScaledMetric(relativeTo: .body) private var claudeCardHeight: CGFloat = 162
-    @ScaledMetric(relativeTo: .body) private var codexCardHeight: CGFloat = 124
-    @ScaledMetric(relativeTo: .body) private var unavailableCardHeight: CGFloat = 162
+    @ScaledMetric(relativeTo: .body) private var accountCardHeight: CGFloat = 162
 
     nonisolated static func == (lhs: AccountCard, rhs: AccountCard) -> Bool {
         lhs.snapshot == rhs.snapshot
@@ -885,13 +883,7 @@ private struct AccountCard: View, Equatable {
     }
 
     private var cardHeight: CGFloat {
-        guard snapshot.state != .unavailable,
-              snapshot.state != .quotaUnavailable else {
-            return unavailableCardHeight
-        }
-        return snapshot.slot.provider == .claude
-            ? claudeCardHeight
-            : codexCardHeight
+        accountCardHeight
     }
 
     var body: some View {
@@ -909,6 +901,9 @@ private struct AccountCard: View, Equatable {
                                     weight: .bold
                                 )
                             )
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .allowsTightening(true)
                         PlanBadge(text: snapshot.plan)
                     }
                     Text(snapshot.identity)
