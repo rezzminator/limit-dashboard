@@ -1,20 +1,48 @@
 # Limit Dashboard status
 
-Snapshot verified on 2026-07-28 (Europe/Amsterdam).
+Snapshot verified on 2026-07-29 (Europe/Amsterdam).
+
+## Dock installation
+
+The signed app is installed at `/Applications/Limit Dashboard.app`. A
+bookmark-backed persistent Dock tile points to that stable location. The tile
+was clicked through macOS Accessibility, and the launched process was verified
+as `/Applications/Limit Dashboard.app/Contents/MacOS/LimitDashboard` with one
+dashboard window.
 
 ## Account impact
 
 | Account | Dashboard source | Result |
 |---|---|---|
 | Claude — `mrez9090@gmail.com` | `~/.claude.json` | **Cached**: 0% used / 100% remaining in the 5-hour window, 90% used / 10% remaining in the 7-day window, and 97% used / 3% remaining in the weekly Fable limit. The first card now renders correctly. |
-| Claude — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` | **Cached**: 10% used / 90% remaining in the 5-hour window, **73% used / 27% remaining in the 7-day window**, and 26% used / 74% remaining in the weekly Fable limit. |
+| Claude — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` identity/Fable cache plus the fresh slot-2 `/tmp/cc-rate-limits` snapshot | **Local status-line snapshot**: 2% used / 98% remaining in the 5-hour window, **82% used / 18% remaining in the 7-day window**, and 26% used / 74% remaining in the cached weekly Fable limit. |
 | Claude — `reza@intuita.health` | `~/.claude3/.claude.json` | **Cached and matching**: 0% used / 100% remaining in the 5-hour window, 91% used / 9% remaining in the 7-day window, and 77% used / 23% remaining in the weekly Fable limit. |
-| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **91% remaining** / 9% used in the current weekly window during the latest render. |
+| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **92% remaining** / 8% used in the current weekly window during the latest render. |
 
 Claude cache availability can change as local provider sessions rotate. The
 dashboard re-reads all three files on every selected interval. It derives the
 full email from each current state file and refuses a cached quota block whose
 account identifier does not match that file's current account.
+
+## Account-two stale-cache correction
+
+The account registry and cached account identifiers match, and the raw
+`seven_day.utilization` field is correctly interpreted as Used. Rounding is not
+involved: `~/.claude2/.claude.json` still contains exactly 73 from a quota fetch
+on 2026-07-28 at 17:34 local time.
+
+The user's existing Claude Code status line receives Anthropic's documented
+`rate_limits.five_hour.used_percentage` and
+`rate_limits.seven_day.used_percentage` fields. Its current slot-2 snapshot
+contains 82% seven-day Used. The dashboard previously ignored that supported
+local source and therefore kept rendering the stale 73%.
+
+The app now prefers a status-line snapshot only when its slot number matches,
+it is no more than one hour old, it was harvested after the authoritative
+account state file was modified, and its provider reset window remains active.
+These checks prevent a stale pre-swap session from being attached to a newly
+registered account. The state file remains authoritative for the full email,
+account identity, plan, and cached Fable-specific limit.
 
 ## Rendering and mapping correction
 
@@ -118,7 +146,9 @@ Accessibility inspection after opening and after an automatic refresh returned
 - It contains no Keychain query code or Claude credential service names.
 - It makes no Claude network requests.
 - It never asks for a password.
-- Claude cards read only non-Keychain `.claude.json` cache data.
+- Claude cards read only non-Keychain `.claude.json` state/cache data and
+  optional local snapshots of Claude Code's documented status-line
+  `rate_limits` fields.
 - The primary Claude state path is `~/.claude.json` (not
   `~/.claude/.claude.json`).
 - Fable is read only from
@@ -135,30 +165,31 @@ Accessibility inspection after opening and after an automatic refresh returned
 
 ## Non-Keychain alternatives
 
-1. Continue using cached-only mode. If an already trusted local Claude process
-   updates a profile's `.claude.json`, the dashboard picks it up at the selected
-   interval or on manual refresh.
-2. A future provider-supported, non-Keychain local session source can be added
-   if one is configured. None was found for these three Claude profiles during
-   this inventory.
+1. Continue using local-only mode. If an already trusted local Claude process
+   updates a profile's `.claude.json` or its existing status-line quota
+   snapshot, the dashboard picks it up at the selected interval or on manual
+   refresh.
+2. Claude Code's documented status-line `rate_limits` fields are now used when
+   the existing local harvester has a fresh, safely associated sample.
 3. Keychain behavior remains out of scope unless the user later explicitly
    authorizes a specific action.
 
 ## Verification
 
 - Release build: passed.
-- Swift tests: 15 executed, 14 passed and 1 opt-in live test skipped by default.
+- Swift tests: 16 executed, 15 passed and 1 opt-in live test skipped by default.
 - Opt-in live Codex integration test: passed.
 - App signature and `Info.plist`: passed.
 - Binary linkage check: no Security framework.
 - Source audit: no `SecItem`, `kSec`, Claude Keychain service, or Anthropic
   endpoint path.
-- Window render: visually inspected with all four compact cards, full emails, cached
-  states, the corrected first account, the second account at 73% seven-day
-  Used, the matching third account at 91% seven-day Used, remaining-first
-  headlines, the persisted interval control, Claude Fable usage, live Codex
-  state, distinct quota-snapshot and 30-day Vertex-token charts, and the
-  summary-only full-width Vertex estimate card.
+- Window render: visually inspected with all four compact cards, full emails,
+  local states, the corrected first account, the second account at 82%
+  seven-day Used from its fresh status-line snapshot, the matching third
+  account at 91% seven-day Used, remaining-first headlines, the persisted
+  interval control, Claude Fable usage, live Codex state, distinct
+  quota-snapshot and 30-day Vertex-token charts, and the summary-only
+  full-width Vertex estimate card.
 - Automatic-refresh render: before/after captures showed no loading replacement
   or layout/card redraw; only the freshness text advanced.
 

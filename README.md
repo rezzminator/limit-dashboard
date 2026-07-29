@@ -79,9 +79,15 @@ Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
 ## Credential and network behavior
 
 - The app does not access macOS Keychain and never triggers a Keychain prompt.
-- Claude cards read only the existing cached usage snapshots in each local
-  account state file: `~/.claude.json`, `~/.claude2/.claude.json`, and
+- Claude identities and fallback usage snapshots come from each local account
+  state file: `~/.claude.json`, `~/.claude2/.claude.json`, and
   `~/.claude3/.claude.json`.
+- If the user's existing Claude Code status-line command has written a current
+  snapshot under `/tmp/cc-rate-limits`, the app prefers its officially
+  supported `rate_limits.five_hour` and `rate_limits.seven_day` values. A file
+  is accepted only for the matching config slot, for at most one hour, after
+  the authoritative account state file was last modified, and while its reset
+  window is still active.
 - Full account email addresses come from each file's
   `oauthAccount.emailAddress`, with the configured label used only if that
   field is absent. Tokens and other credential fields are never shown.
@@ -98,10 +104,15 @@ Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
 - The app never asks for passwords and never refreshes, rotates, overwrites, or
   exports provider credentials.
 
-Claude cards refresh their non-Keychain cache view at the selected interval. If
-another trusted local process updates a profile cache, the dashboard picks up
-the new snapshot automatically. Each Claude card also shows **Fable usage**, the
-model-specific weekly limit, when its cache contains this exact entry:
+Claude cards refresh their non-Keychain local view at the selected interval. If
+another trusted local Claude Code process updates its status-line snapshot or a
+profile cache, the dashboard picks up the new value automatically. Claude Code
+documents `rate_limits.*.used_percentage` as the consumed percentage from 0 to
+100 and `resets_at` as Unix epoch seconds:
+<https://code.claude.com/docs/en/statusline#rate-limit-usage>.
+
+Each Claude card also shows **Fable usage**, the model-specific weekly limit,
+when its state-file cache contains this exact entry:
 
 ```text
 cachedUsageUtilization.utilization.limits[]

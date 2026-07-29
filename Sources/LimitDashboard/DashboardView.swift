@@ -145,7 +145,7 @@ struct DashboardView: View {
         HStack(spacing: 9) {
             Image(systemName: "lock.shield")
                 .foregroundStyle(.secondary)
-            Text("Codex stays local; Claude reads cached profile snapshots only.")
+            Text("Codex stays local; Claude reads local quota snapshots only.")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -996,7 +996,12 @@ private struct AccountCard: View, Equatable {
                     Circle()
                         .fill(accent)
                         .frame(width: 5, height: 5)
-                    Text(snapshot.state == .live ? "Provider confirmed" : "Local quota snapshot")
+                    Text(
+                        snapshot.detail
+                            ?? (snapshot.state == .live
+                                ? "Provider confirmed"
+                                : "Local quota snapshot")
+                    )
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     if let resetAt = headline.resetAt {

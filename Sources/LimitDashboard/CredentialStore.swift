@@ -1,7 +1,31 @@
 import CryptoKit
 import Foundation
 
+struct ClaudeStatusLineRateLimits: Sendable, Equatable {
+    let fiveHour: UsageWindow?
+    let sevenDay: UsageWindow?
+    let harvestedAt: Date
+}
+
 struct CredentialStore: Sendable {
+    private struct ClaudeStatusLineSample: Decodable, Sendable {
+        let accountSlot: Int
+        let fiveHourUsed: Double
+        let sevenDayUsed: Double
+        let fiveHourResetsAt: TimeInterval
+        let sevenDayResetsAt: TimeInterval
+        let harvestedAt: TimeInterval
+
+        enum CodingKeys: String, CodingKey {
+            case accountSlot = "acct"
+            case fiveHourUsed = "five_hour_used"
+            case sevenDayUsed = "seven_day_used"
+            case fiveHourResetsAt = "five_hour_resets_at"
+            case sevenDayResetsAt = "seven_day_resets_at"
+            case harvestedAt = "ts"
+        }
+    }
+
     private struct CodexEnvelope: Decodable {
         struct Tokens: Decodable {
             let accessToken: String
@@ -16,6 +40,18 @@ struct CredentialStore: Sendable {
         }
 
         let tokens: Tokens
+    }
+
+    private static let statusLineSnapshotLifetime: TimeInterval = 60 * 60
+    private let claudeRateLimitsDirectory: URL
+
+    init(
+        claudeRateLimitsDirectory: URL = URL(
+            fileURLWithPath: "/tmp/cc-rate-limits",
+            isDirectory: true
+        )
+    ) {
+        self.claudeRateLimitsDirectory = claudeRateLimitsDirectory
     }
 
     func load(_ slot: AccountSlot) -> LoadedCredential {
@@ -42,6 +78,9 @@ struct CredentialStore: Sendable {
         else {
             return nil
         }
+        let stateModifiedAt = (
+            try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        )?.contentModificationDate
 
         let account = root["oauthAccount"] as? [String: Any]
         let registryIdentity = LocalIdentity(
@@ -70,11 +109,26 @@ struct CredentialStore: Sendable {
         guard !windows.isEmpty else { return nil }
         let fableUsage = fableUsageWindow(from: utilization)
 
-        let fetchedAt: Date?
+        var fetchedAt: Date?
         if let milliseconds = cached["fetchedAtMs"] as? Double {
             fetchedAt = Date(timeIntervalSince1970: milliseconds / 1_000)
         } else {
             fetchedAt = nil
+        }
+        var snapshotDetail = detail
+        if
+            let stateModifiedAt,
+            let statusLine = localClaudeRateLimits(
+                for: slot,
+                stateModifiedAt: stateModifiedAt
+            )
+        {
+            windows = mergeClaudeWindows(
+                cached: windows,
+                statusLine: statusLine
+            )
+            fetchedAt = statusLine.harvestedAt
+            snapshotDetail = "Claude Code status-line quota snapshot"
         }
 
         let providerAccountID = (account?["accountUuid"] as? String)
@@ -89,7 +143,7 @@ struct CredentialStore: Sendable {
             windows: windows,
             fableUsage: fableUsage,
             providerAccountID: providerAccountID,
-            detail: detail,
+            detail: snapshotDetail,
             refreshedAt: fetchedAt,
             duplicatePeer: nil
         )
@@ -181,6 +235,136 @@ struct CredentialStore: Sendable {
             return true
         }
         return registryID == cachedID
+    }
+
+    func localClaudeRateLimits(
+        for slot: AccountSlot,
+        stateModifiedAt: Date,
+        now: Date = Date()
+    ) -> ClaudeStatusLineRateLimits? {
+        guard slot.provider == .claude else { return nil }
+        let expectedSlot = slot.position + 1
+        guard
+            let files = try? FileManager.default.contentsOfDirectory(
+                at: claudeRateLimitsDirectory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+        else {
+            return nil
+        }
+
+        let decoder = JSONDecoder()
+        let samples = files.compactMap { file -> ClaudeStatusLineSample? in
+            let expectedPrefix = "acct-\(expectedSlot)."
+            guard
+                file.lastPathComponent.hasPrefix(expectedPrefix),
+                file.pathExtension == "json",
+                let values = try? file.resourceValues(forKeys: [.isRegularFileKey]),
+                values.isRegularFile == true,
+                let data = try? Data(contentsOf: file, options: [.mappedIfSafe]),
+                let sample = try? decoder.decode(
+                    ClaudeStatusLineSample.self,
+                    from: data
+                ),
+                sample.accountSlot == expectedSlot,
+                (0...100).contains(sample.fiveHourUsed),
+                (0...100).contains(sample.sevenDayUsed)
+            else {
+                return nil
+            }
+
+            let harvestedAt = Date(timeIntervalSince1970: sample.harvestedAt)
+            let age = now.timeIntervalSince(harvestedAt)
+            guard
+                age >= -60,
+                age <= Self.statusLineSnapshotLifetime,
+                harvestedAt >= stateModifiedAt
+            else {
+                return nil
+            }
+            return sample
+        }
+
+        let fiveHour = selectStatusLineWindow(
+            samples: samples,
+            used: \.fiveHourUsed,
+            reset: \.fiveHourResetsAt,
+            id: "five-hour",
+            title: "5-hour",
+            now: now
+        )
+        let sevenDay = selectStatusLineWindow(
+            samples: samples,
+            used: \.sevenDayUsed,
+            reset: \.sevenDayResetsAt,
+            id: "seven-day",
+            title: "7-day",
+            now: now
+        )
+        guard fiveHour != nil || sevenDay != nil else { return nil }
+
+        let harvestedAt = samples
+            .map { Date(timeIntervalSince1970: $0.harvestedAt) }
+            .max() ?? now
+        return ClaudeStatusLineRateLimits(
+            fiveHour: fiveHour,
+            sevenDay: sevenDay,
+            harvestedAt: harvestedAt
+        )
+    }
+
+    private func selectStatusLineWindow(
+        samples: [ClaudeStatusLineSample],
+        used: KeyPath<ClaudeStatusLineSample, Double>,
+        reset: KeyPath<ClaudeStatusLineSample, TimeInterval>,
+        id: String,
+        title: String,
+        now: Date
+    ) -> UsageWindow? {
+        let active = samples.filter {
+            Date(timeIntervalSince1970: $0[keyPath: reset]) > now
+        }
+        guard
+            let latestReset = active.map({ $0[keyPath: reset] }).max()
+        else {
+            return nil
+        }
+
+        let currentWindow = active.filter {
+            abs($0[keyPath: reset] - latestReset) < 1
+        }
+        guard
+            let selected = currentWindow.max(by: {
+                let left = $0[keyPath: used]
+                let right = $1[keyPath: used]
+                if left != right { return left < right }
+                return $0.harvestedAt < $1.harvestedAt
+            })
+        else {
+            return nil
+        }
+
+        return UsageWindow(
+            id: id,
+            title: title,
+            usedPercent: selected[keyPath: used],
+            resetAt: Date(timeIntervalSince1970: selected[keyPath: reset])
+        )
+    }
+
+    func mergeClaudeWindows(
+        cached: [UsageWindow],
+        statusLine: ClaudeStatusLineRateLimits
+    ) -> [UsageWindow] {
+        var byID = Dictionary(uniqueKeysWithValues: cached.map { ($0.id, $0) })
+        if let fiveHour = statusLine.fiveHour {
+            byID[fiveHour.id] = fiveHour
+        }
+        if let sevenDay = statusLine.sevenDay {
+            byID[sevenDay.id] = sevenDay
+        }
+        return ["five-hour", "seven-day"].compactMap { byID[$0] }
     }
 
     private func claudePlan(from account: [String: Any]?) -> String {

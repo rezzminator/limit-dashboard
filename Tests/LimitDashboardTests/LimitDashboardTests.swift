@@ -37,6 +37,110 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(observed.normalizedUsedPercent, 73)
     }
 
+    func testFreshStatusLineSnapshotOverridesStaleSeventyThreePercentCacheForAccountTwo() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-claude-rate-limits-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let fiveHourReset = now.addingTimeInterval(3_600).timeIntervalSince1970
+        let sevenDayReset = now.addingTimeInterval(86_400).timeIntervalSince1970
+
+        func writeSample(
+            named name: String,
+            account: Int,
+            sevenDayUsed: Int,
+            harvestedAt: Date
+        ) throws {
+            let payload = """
+            {
+              "acct": \(account),
+              "five_hour_used": 2,
+              "seven_day_used": \(sevenDayUsed),
+              "five_hour_resets_at": \(fiveHourReset),
+              "seven_day_resets_at": \(sevenDayReset),
+              "ts": \(harvestedAt.timeIntervalSince1970)
+            }
+            """
+            try Data(payload.utf8).write(
+                to: directory.appendingPathComponent(name)
+            )
+        }
+
+        try writeSample(
+            named: "acct-2.older.json",
+            account: 2,
+            sevenDayUsed: 80,
+            harvestedAt: now.addingTimeInterval(-10)
+        )
+        try writeSample(
+            named: "acct-2.current.json",
+            account: 2,
+            sevenDayUsed: 82,
+            harvestedAt: now.addingTimeInterval(-5)
+        )
+        try writeSample(
+            named: "acct-2.wrong-account.json",
+            account: 1,
+            sevenDayUsed: 99,
+            harvestedAt: now
+        )
+
+        let store = CredentialStore(claudeRateLimitsDirectory: directory)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.configured.first { $0.position == 1 }
+        )
+        let statusLine = try XCTUnwrap(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                stateModifiedAt: now.addingTimeInterval(-60),
+                now: now
+            )
+        )
+        XCTAssertEqual(statusLine.fiveHour?.usedPercent, 2)
+        XCTAssertEqual(statusLine.sevenDay?.usedPercent, 82)
+
+        let merged = store.mergeClaudeWindows(
+            cached: [
+                UsageWindow(
+                    id: "five-hour",
+                    title: "5-hour",
+                    usedPercent: 10,
+                    resetAt: nil
+                ),
+                UsageWindow(
+                    id: "seven-day",
+                    title: "7-day",
+                    usedPercent: 73,
+                    resetAt: nil
+                ),
+            ],
+            statusLine: statusLine
+        )
+        XCTAssertEqual(
+            merged.first { $0.id == "seven-day" }?.usedPercent,
+            82
+        )
+        XCTAssertEqual(
+            merged.first { $0.id == "seven-day" }?.remainingPercent,
+            18
+        )
+        XCTAssertNil(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                stateModifiedAt: now.addingTimeInterval(1),
+                now: now
+            ),
+            "A snapshot written before the authoritative registry state must not be associated with the new account."
+        )
+    }
+
     func testCanonicalClaudeStateRegistryUsesTheRootFileForAccountOne() {
         let claude = AccountSlot.configured.filter { $0.provider == .claude }
         XCTAssertEqual(
