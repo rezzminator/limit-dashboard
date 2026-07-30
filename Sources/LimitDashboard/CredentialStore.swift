@@ -112,12 +112,13 @@ struct CredentialStore: Sendable {
         guard !windows.isEmpty else { return nil }
         let fableUsage = fableUsageWindow(from: utilization)
 
-        var fetchedAt: Date?
+        let cachedFetchedAt: Date?
         if let milliseconds = cached["fetchedAtMs"] as? Double {
-            fetchedAt = Date(timeIntervalSince1970: milliseconds / 1_000)
+            cachedFetchedAt = Date(timeIntervalSince1970: milliseconds / 1_000)
         } else {
-            fetchedAt = nil
+            cachedFetchedAt = nil
         }
+        var fetchedAt = cachedFetchedAt
         var snapshotDetail = detail
         if
             let stateModifiedAt,
@@ -140,6 +141,34 @@ struct CredentialStore: Sendable {
                 plan: plan,
                 detail: "A fresh local quota sample exists, but its account association could not be proven. Older cached percentages were not shown."
             )
+        } else if
+            let stateModifiedAt,
+            let historicalStatusLine = localClaudeRateLimits(
+                for: slot,
+                stateModifiedAt: stateModifiedAt,
+                currentAccountID: account?["accountUuid"] as? String,
+                maximumAge: nil
+            ),
+            historicalStatusLine.harvestedAt > (cachedFetchedAt ?? .distantPast)
+        {
+            let merged = mergeClaudeWindows(
+                cached: windows,
+                statusLine: historicalStatusLine,
+                requireMonotonicActiveWindow: true
+            )
+            if merged != windows {
+                windows = merged
+                fetchedAt = historicalStatusLine.harvestedAt
+                snapshotDetail = "5-hour/7-day snapshot · \(snapshotAge(historicalStatusLine.harvestedAt)) old"
+            }
+        }
+
+        if
+            snapshotDetail == nil,
+            let fetchedAt,
+            Date().timeIntervalSince(fetchedAt) > Self.statusLineSnapshotLifetime
+        {
+            snapshotDetail = "Local quota snapshot · \(snapshotAge(fetchedAt)) old"
         }
 
         let providerAccountID = (account?["accountUuid"] as? String)
@@ -252,6 +281,7 @@ struct CredentialStore: Sendable {
         for slot: AccountSlot,
         stateModifiedAt: Date,
         currentAccountID: String? = nil,
+        maximumAge: TimeInterval? = Self.statusLineSnapshotLifetime,
         now: Date = Date()
     ) -> ClaudeStatusLineRateLimits? {
         guard slot.provider == .claude else { return nil }
@@ -290,7 +320,7 @@ struct CredentialStore: Sendable {
             let age = now.timeIntervalSince(harvestedAt)
             guard
                 age >= -60,
-                age <= Self.statusLineSnapshotLifetime,
+                maximumAge.map({ age <= $0 }) ?? true,
                 harvestedAt >= stateModifiedAt
                     || registryIdentityWasContinuous(
                         for: slot,
@@ -494,16 +524,69 @@ struct CredentialStore: Sendable {
 
     func mergeClaudeWindows(
         cached: [UsageWindow],
-        statusLine: ClaudeStatusLineRateLimits
+        statusLine: ClaudeStatusLineRateLimits,
+        requireMonotonicActiveWindow: Bool = false
     ) -> [UsageWindow] {
         var byID = Dictionary(uniqueKeysWithValues: cached.map { ($0.id, $0) })
         if let fiveHour = statusLine.fiveHour {
-            byID[fiveHour.id] = fiveHour
+            byID[fiveHour.id] = preferredClaudeWindow(
+                cached: byID[fiveHour.id],
+                observed: fiveHour,
+                requireMonotonicActiveWindow: requireMonotonicActiveWindow
+            )
         }
         if let sevenDay = statusLine.sevenDay {
-            byID[sevenDay.id] = sevenDay
+            byID[sevenDay.id] = preferredClaudeWindow(
+                cached: byID[sevenDay.id],
+                observed: sevenDay,
+                requireMonotonicActiveWindow: requireMonotonicActiveWindow
+            )
         }
         return ["five-hour", "seven-day"].compactMap { byID[$0] }
+    }
+
+    private func preferredClaudeWindow(
+        cached: UsageWindow?,
+        observed: UsageWindow,
+        requireMonotonicActiveWindow: Bool
+    ) -> UsageWindow {
+        guard
+            requireMonotonicActiveWindow,
+            let cached,
+            let cachedReset = cached.resetAt,
+            let observedReset = observed.resetAt
+        else {
+            return observed
+        }
+
+        let resetTolerance: TimeInterval = 2
+        if observedReset < cachedReset.addingTimeInterval(-resetTolerance) {
+            return cached
+        }
+        let sameWindow =
+            abs(observedReset.timeIntervalSince(cachedReset)) <= resetTolerance
+        if sameWindow,
+           observed.normalizedUsedPercent < cached.normalizedUsedPercent {
+            return cached
+        }
+        return observed
+    }
+
+    private func snapshotAge(_ capturedAt: Date, now: Date = Date()) -> String {
+        let totalMinutes = max(
+            0,
+            Int(now.timeIntervalSince(capturedAt) / 60)
+        )
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 {
+            return "\(days)d \(hours)h"
+        }
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(minutes)m"
     }
 
     private func claudePlan(from account: [String: Any]?) -> String {

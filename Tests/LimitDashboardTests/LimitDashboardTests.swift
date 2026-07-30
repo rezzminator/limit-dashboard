@@ -292,6 +292,115 @@ final class LimitDashboardTests: XCTestCase {
         )
     }
 
+    func testNewestIdentityMatchedActiveWindowBeatsOlderSeventyThreePercentCache() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-claude-stale-selection-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let harvestedAt = now.addingTimeInterval(-3 * 60 * 60)
+        let resetAt = now.addingTimeInterval(36 * 60 * 60)
+        let sample = """
+        {
+          "acct": 2,
+          "five_hour_used": 1,
+          "seven_day_used": 91,
+          "five_hour_resets_at": \(now.addingTimeInterval(60 * 60).timeIntervalSince1970),
+          "seven_day_resets_at": \(resetAt.timeIntervalSince1970),
+          "ts": \(harvestedAt.timeIntervalSince1970)
+        }
+        """
+        try Data(sample.utf8).write(
+            to: directory.appendingPathComponent("acct-2.current.json")
+        )
+
+        let store = CredentialStore(claudeRateLimitsDirectory: directory)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.configured.first { $0.position == 1 }
+        )
+        XCTAssertNil(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                stateModifiedAt: harvestedAt.addingTimeInterval(-60),
+                now: now
+            ),
+            "The three-hour-old observation must not be labeled fresh."
+        )
+        let historical = try XCTUnwrap(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                stateModifiedAt: harvestedAt.addingTimeInterval(-60),
+                maximumAge: nil,
+                now: now
+            )
+        )
+        let merged = store.mergeClaudeWindows(
+            cached: [
+                UsageWindow(
+                    id: "five-hour",
+                    title: "5-hour",
+                    usedPercent: 10,
+                    resetAt: now.addingTimeInterval(-60)
+                ),
+                UsageWindow(
+                    id: "seven-day",
+                    title: "7-day",
+                    usedPercent: 73,
+                    resetAt: resetAt.addingTimeInterval(0.5)
+                ),
+            ],
+            statusLine: historical,
+            requireMonotonicActiveWindow: true
+        )
+        XCTAssertEqual(
+            merged.first { $0.id == "seven-day" }?.usedPercent,
+            91,
+            "The newer 91%-used observation must win over the two-day-old 73% cache for the same reset window."
+        )
+        XCTAssertEqual(
+            merged.first { $0.id == "five-hour" }?.usedPercent,
+            1,
+            "A newer reset window may legitimately have lower usage."
+        )
+    }
+
+    func testOlderObservationCannotLowerUsageWithinSameResetWindow() {
+        let resetAt = Date(timeIntervalSince1970: 2_000_100_000)
+        let statusLine = ClaudeStatusLineRateLimits(
+            fiveHour: nil,
+            sevenDay: UsageWindow(
+                id: "seven-day",
+                title: "7-day",
+                usedPercent: 89,
+                resetAt: resetAt
+            ),
+            harvestedAt: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+        let merged = CredentialStore().mergeClaudeWindows(
+            cached: [
+                UsageWindow(
+                    id: "seven-day",
+                    title: "7-day",
+                    usedPercent: 90,
+                    resetAt: resetAt.addingTimeInterval(0.5)
+                )
+            ],
+            statusLine: statusLine,
+            requireMonotonicActiveWindow: true
+        )
+        XCTAssertEqual(
+            merged.first?.usedPercent,
+            90,
+            "Quota usage cannot move backward inside one reset window."
+        )
+    }
+
     func testCanonicalClaudeStateRegistryUsesTheRootFileForAccountOne() {
         let claude = AccountSlot.configured.filter { $0.provider == .claude }
         XCTAssertEqual(

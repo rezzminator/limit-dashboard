@@ -1,6 +1,6 @@
 # Limit Dashboard status
 
-Snapshot verified on 2026-07-29 (Europe/Amsterdam).
+Snapshot verified on 2026-07-30 (Europe/Amsterdam).
 
 ## Dock installation
 
@@ -15,9 +15,9 @@ dashboard window.
 | Account | Dashboard source | Result |
 |---|---|---|
 | Claude Account 1 — `mrez9090@gmail.com` | `~/.claude.json` | **Cached**: 0% used / 100% remaining in the 5-hour window, 90% used / 10% remaining in the 7-day window, and 97% used / 3% remaining in the weekly Fable limit. The first card now renders correctly. |
-| Claude Account 2 — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` identity/Fable cache plus the fresh slot-2 `/tmp/cc-rate-limits` snapshot | **Local status-line snapshot**: 13% used / 87% remaining in the 5-hour window, **84% used / 16% remaining in the 7-day window**, and 26% used / 74% remaining in the cached weekly Fable limit. |
+| Claude Account 2 — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` identity/Fable cache plus the newest identity-matched slot-2 `/tmp/cc-rate-limits` snapshot | **Aged local status-line snapshot**: 1% used / 99% remaining in the 5-hour window, **91% used / 9% remaining in the 7-day window**, and 26% used / 74% remaining in the cached weekly Fable limit. The card shows the snapshot age. |
 | Claude Account 3 — `reza@intuita.health` | `~/.claude3/.claude.json` | **Cached and matching**: 0% used / 100% remaining in the 5-hour window, 91% used / 9% remaining in the 7-day window, and 77% used / 23% remaining in the weekly Fable limit. |
-| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **85% remaining** / 15% used in the current weekly window during the latest render. |
+| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **46% remaining** / 54% used in the current window during the latest render. |
 
 Claude cache availability can change as local provider sessions rotate. The
 dashboard re-reads all three files on every selected interval. It derives the
@@ -57,6 +57,18 @@ account change. The app rejected the fresh sample and fell back to the old
 account identity. The new continuity check keeps 13%/84%, while a regression
 test verifies that an actual intervening account change yields no accepted
 sample.
+
+On 2026-07-30, a second selection regression exposed 73% again. The newest
+identity-matched slot-2 observation was 91% seven-day Used, captured at 11:50
+local time for the same August 1 05:00 reset. The fixed one-hour currentness
+cutoff rejected it at 15:25, then silently selected the much older 73% cache
+from July 28. The selector now keeps “current” and “newest available” distinct:
+a current safely associated observation still wins immediately; otherwise the
+newest safely associated active-window observation may replace an older cache
+and the card explicitly displays its age. For one reset window, Used may stay
+the same or increase but cannot move backward. Regression coverage exercises
+the observed 73%-versus-91% case and rejects a lower observation for the same
+reset.
 
 ## Rendering and mapping correction
 
@@ -196,23 +208,24 @@ Accessibility inspection after opening and after an automatic refresh returned
    updates a profile's `.claude.json` or its existing status-line quota
    snapshot, the dashboard picks it up at the selected interval or on manual
    refresh.
-2. Claude Code's documented status-line `rate_limits` fields are now used when
-   the existing local harvester has a fresh, safely associated sample.
+2. Claude Code's documented status-line `rate_limits` fields are used when the
+   existing local harvester has a safely associated active-window sample.
+   Samples older than one hour are labeled with their age.
 3. Keychain behavior remains out of scope unless the user later explicitly
    authorizes a specific action.
 
 ## Verification
 
 - Release build: passed.
-- Swift tests: 20 executed, 19 passed and 1 opt-in live test skipped by default.
+- Swift tests: 22 executed, 21 passed and 1 opt-in live test skipped by default.
 - Opt-in live Codex integration test: passed.
 - App signature and `Info.plist`: passed.
 - Binary linkage check: no Security framework.
 - Source audit: no `SecItem`, `kSec`, Claude Keychain service, or Anthropic
   endpoint path.
 - Window render: visually inspected with all four compact cards, full emails,
-  local states, the corrected first account, the second account at 84%
-  seven-day Used from its fresh status-line snapshot, the matching third
+  local states, the corrected first account, the second account at 91%
+  seven-day Used from its age-labeled status-line snapshot, the matching third
   account at 91% seven-day Used, remaining-first headlines, the persisted
   interval control, per-window reset countdowns, Claude Fable usage, live
   Codex state, distinct

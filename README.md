@@ -94,10 +94,14 @@ Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
 - If the user's existing Claude Code status-line command has written a current
   snapshot under `/tmp/cc-rate-limits`, the app prefers its officially
   supported `rate_limits.five_hour` and `rate_limits.seven_day` values. A file
-  is accepted only for the matching config slot, for at most one hour, and
-  while its reset window is still active. If the state file was rewritten after
-  harvest, the app requires the local registry backups to prove that the same
-  account identity remained assigned to that slot throughout.
+  is accepted only for the matching config slot and while its reset window is
+  still active. Samples up to one hour old are current local snapshots. If no
+  current sample exists, a newer identity-matched active-window observation may
+  replace an older cache, but its age is shown explicitly. Within the same
+  reset window, an older/lower observation can never reduce the displayed Used
+  percentage. If the state file was rewritten after harvest, the app requires
+  the local registry backups to prove that the same account identity remained
+  assigned to that slot throughout.
 - Full account email addresses come from each file's
   `oauthAccount.emailAddress`, with the configured label used only if that
   field is absent. Tokens and other credential fields are never shown.
