@@ -43,6 +43,39 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(observed.normalizedUsedPercent, 73)
     }
 
+    func testResetCountdownUsesDaysHoursAndZeroPaddedMinutes() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let resetAt = now.addingTimeInterval(
+            TimeInterval((24 + 12) * 60 * 60 + 5 * 60)
+        )
+        XCTAssertEqual(
+            ResetCountdown.compact(until: resetAt, now: now),
+            "1D 12H 05M"
+        )
+        XCTAssertEqual(
+            ResetCountdown.accessibilityText(until: resetAt, now: now),
+            "1 day, 12 hours, 5 minutes"
+        )
+    }
+
+    func testResetCountdownRoundsUpPartialMinuteAndStopsAtZero() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        XCTAssertEqual(
+            ResetCountdown.compact(
+                until: now.addingTimeInterval(61),
+                now: now
+            ),
+            "0D 00H 02M"
+        )
+        XCTAssertEqual(
+            ResetCountdown.compact(
+                until: now.addingTimeInterval(-1),
+                now: now
+            ),
+            "0D 00H 00M"
+        )
+    }
+
     func testFreshStatusLineSnapshotOverridesStaleSeventyThreePercentCacheForAccountTwo() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "limit-dashboard-claude-rate-limits-\(UUID().uuidString)",

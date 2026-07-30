@@ -104,6 +104,41 @@ struct UsageWindow: Identifiable, Hashable, Sendable {
     }
 }
 
+enum ResetCountdown {
+    static func compact(until resetAt: Date, now: Date = Date()) -> String {
+        let remainingSeconds = max(0, resetAt.timeIntervalSince(now))
+        let totalMinutes = remainingSeconds > 0
+            ? Int(ceil(remainingSeconds / 60))
+            : 0
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        return String(format: "%dD %02dH %02dM", days, hours, minutes)
+    }
+
+    static func accessibilityText(
+        until resetAt: Date,
+        now: Date = Date()
+    ) -> String {
+        let remainingSeconds = max(0, resetAt.timeIntervalSince(now))
+        let totalMinutes = remainingSeconds > 0
+            ? Int(ceil(remainingSeconds / 60))
+            : 0
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        return [
+            spoken(days, unit: "day"),
+            spoken(hours, unit: "hour"),
+            spoken(minutes, unit: "minute"),
+        ].joined(separator: ", ")
+    }
+
+    private static func spoken(_ value: Int, unit: String) -> String {
+        "\(value) \(unit)\(value == 1 ? "" : "s")"
+    }
+}
+
 struct AccountSnapshot: Identifiable, Equatable, Sendable {
     let id: String
     let slot: AccountSlot

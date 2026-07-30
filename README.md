@@ -28,6 +28,12 @@ They grow only modestly and stop before dominating a tall window. All four
 account cards share one equal, Dynamic Type-aware height, while any remaining
 window space is left as intentional whitespace above the footer.
 
+Every quota row shows its own live reset countdown in
+`1D 12H 05M` format. Countdowns advance locally once per minute without
+triggering a provider refresh or replacing the account card. A row whose
+authorized source has no reset timestamp says **Reset unavailable** instead of
+inventing a time.
+
 ## Local history and Vertex charts
 
 The dashboard keeps unlike measurements in two separate chart boxes:

@@ -866,7 +866,7 @@ private struct VertexMetric: View {
 
 private struct AccountCard: View, Equatable {
     let snapshot: AccountSnapshot
-    @ScaledMetric(relativeTo: .body) private var accountCardHeight: CGFloat = 162
+    @ScaledMetric(relativeTo: .body) private var accountCardHeight: CGFloat = 194
 
     nonisolated static func == (lhs: AccountCard, rhs: AccountCard) -> Bool {
         lhs.snapshot == rhs.snapshot
@@ -999,11 +999,6 @@ private struct AccountCard: View, Equatable {
                     )
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    if let resetAt = headline.resetAt {
-                        Text("· resets \(compactReset(resetAt))")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
         }
@@ -1038,19 +1033,6 @@ private struct AccountCard: View, Equatable {
         }
     }
 
-    private func compactReset(_ date: Date) -> String {
-        let totalMinutes = max(0, Int(date.timeIntervalSinceNow / 60))
-        let days = totalMinutes / (24 * 60)
-        let hours = (totalMinutes % (24 * 60)) / 60
-        let minutes = totalMinutes % 60
-        if days > 0 {
-            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
-        }
-        if hours > 0 {
-            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
-        }
-        return "\(minutes)m"
-    }
 }
 
 private struct RefreshIntervalControl: View {
@@ -1186,7 +1168,7 @@ private struct CompactLimitRow: View {
     let accent: Color
     @ScaledMetric(relativeTo: .caption) private var labelWidth: CGFloat = 52
     @ScaledMetric(relativeTo: .caption) private var valueWidth: CGFloat = 168
-    @ScaledMetric(relativeTo: .caption) private var rowHeight: CGFloat = 19
+    @ScaledMetric(relativeTo: .caption) private var rowHeight: CGFloat = 31
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1207,10 +1189,13 @@ private struct CompactLimitRow: View {
                 }
             }
             .frame(height: 5)
-            Text("\(window.usedLabel) · \(window.remainingLabel)")
-                .font(.system(.caption, design: .rounded, weight: .bold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
+            VStack(alignment: .trailing, spacing: 0) {
+                Text("\(window.usedLabel) · \(window.remainingLabel)")
+                    .font(.system(.caption, design: .rounded, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                ResetCountdownLabel(resetAt: window.resetAt)
+            }
                 .frame(width: valueWidth, alignment: .trailing)
         }
         .frame(height: rowHeight)
@@ -1222,7 +1207,7 @@ private struct CompactFableRow: View {
     let accent: Color
     @ScaledMetric(relativeTo: .caption) private var labelWidth: CGFloat = 52
     @ScaledMetric(relativeTo: .caption) private var valueWidth: CGFloat = 168
-    @ScaledMetric(relativeTo: .caption) private var rowHeight: CGFloat = 19
+    @ScaledMetric(relativeTo: .caption) private var rowHeight: CGFloat = 31
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1244,10 +1229,13 @@ private struct CompactFableRow: View {
                     }
                 }
                 .frame(height: 5)
-                Text("\(window.usedLabel) · \(window.remainingLabel)")
-                    .font(.system(.caption, design: .rounded, weight: .bold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.78)
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text("\(window.usedLabel) · \(window.remainingLabel)")
+                        .font(.system(.caption, design: .rounded, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                    ResetCountdownLabel(resetAt: window.resetAt)
+                }
                     .frame(width: valueWidth, alignment: .trailing)
             } else {
                 Spacer()
@@ -1257,6 +1245,36 @@ private struct CompactFableRow: View {
             }
         }
         .frame(height: rowHeight)
+    }
+}
+
+private struct ResetCountdownLabel: View {
+    let resetAt: Date?
+
+    var body: some View {
+        if let resetAt {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                let compact = ResetCountdown.compact(
+                    until: resetAt,
+                    now: context.date
+                )
+                let accessibility = ResetCountdown.accessibilityText(
+                    until: resetAt,
+                    now: context.date
+                )
+                Text("Resets in \(compact)")
+                    .accessibilityLabel("Resets in \(accessibility)")
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .lineLimit(1)
+        } else {
+            Text("Reset unavailable")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 }
 

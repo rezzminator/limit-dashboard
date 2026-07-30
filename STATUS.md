@@ -117,6 +117,12 @@ Visible dashboard text now uses semantic SwiftUI text styles and scaled layout
 metrics. Key totals are larger, supporting copy remains clearly subordinate,
 and long account identities tighten or scale before truncating.
 
+Every 5-hour, 7-day, Fable, and Codex quota row now shows its own reset
+countdown in `1D 12H 05M` format. The countdown uses the row's existing reset
+timestamp and advances locally once per minute through a narrow `TimelineView`;
+it does not poll the provider or recreate the card. Rows without a reset
+timestamp show `Reset unavailable`.
+
 ## Local historical and Vertex charts
 
 - A dedicated Swift Charts panel renders four stable, differently colored
@@ -198,7 +204,7 @@ Accessibility inspection after opening and after an automatic refresh returned
 ## Verification
 
 - Release build: passed.
-- Swift tests: 18 executed, 17 passed and 1 opt-in live test skipped by default.
+- Swift tests: 20 executed, 19 passed and 1 opt-in live test skipped by default.
 - Opt-in live Codex integration test: passed.
 - App signature and `Info.plist`: passed.
 - Binary linkage check: no Security framework.
@@ -208,7 +214,8 @@ Accessibility inspection after opening and after an automatic refresh returned
   local states, the corrected first account, the second account at 84%
   seven-day Used from its fresh status-line snapshot, the matching third
   account at 91% seven-day Used, remaining-first headlines, the persisted
-  interval control, Claude Fable usage, live Codex state, distinct
+  interval control, per-window reset countdowns, Claude Fable usage, live
+  Codex state, distinct
   quota-snapshot and 30-day Vertex-token charts, and the summary-only
   full-width Vertex estimate card.
 - Automatic-refresh render: before/after captures showed no loading replacement
