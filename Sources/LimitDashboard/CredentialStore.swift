@@ -69,7 +69,8 @@ struct CredentialStore: Sendable {
     func cachedClaudeSnapshot(
         for slot: AccountSlot,
         identity: LocalIdentity,
-        detail: String? = nil
+        detail: String? = nil,
+        now: Date = Date()
     ) -> AccountSnapshot? {
         guard let url = claudeStateURL(for: slot) else { return nil }
 
@@ -103,14 +104,23 @@ struct CredentialStore: Sendable {
         }
 
         var windows: [UsageWindow] = []
-        if let fiveHour = usageWindow(from: utilization["five_hour"], id: "five-hour", title: "5-hour") {
+        if let fiveHour = usageWindow(
+            from: utilization["five_hour"],
+            id: "five-hour",
+            title: "5-hour",
+            now: now
+        ) {
             windows.append(fiveHour)
         }
-        if let sevenDay = usageWindow(from: utilization["seven_day"], id: "seven-day", title: "7-day") {
+        if let sevenDay = usageWindow(
+            from: utilization["seven_day"],
+            id: "seven-day",
+            title: "7-day",
+            now: now
+        ) {
             windows.append(sevenDay)
         }
-        guard !windows.isEmpty else { return nil }
-        let fableUsage = fableUsageWindow(from: utilization)
+        let fableUsage = fableUsageWindow(from: utilization, now: now)
 
         let cachedFetchedAt: Date?
         if let milliseconds = cached["fetchedAtMs"] as? Double {
@@ -125,7 +135,8 @@ struct CredentialStore: Sendable {
             let statusLine = localClaudeRateLimits(
                 for: slot,
                 stateModifiedAt: stateModifiedAt,
-                currentAccountID: account?["accountUuid"] as? String
+                currentAccountID: account?["accountUuid"] as? String,
+                now: now
             )
         {
             windows = mergeClaudeWindows(
@@ -134,7 +145,7 @@ struct CredentialStore: Sendable {
             )
             fetchedAt = statusLine.harvestedAt
             snapshotDetail = "Claude Code status-line quota snapshot"
-        } else if hasFreshClaudeRateLimitCandidate(for: slot) {
+        } else if hasFreshClaudeRateLimitCandidate(for: slot, now: now) {
             return AccountSnapshot.quotaUnavailable(
                 slot,
                 identity: registryIdentity.preferredDisplay ?? slot.localLabel,
@@ -147,7 +158,8 @@ struct CredentialStore: Sendable {
                 for: slot,
                 stateModifiedAt: stateModifiedAt,
                 currentAccountID: account?["accountUuid"] as? String,
-                maximumAge: nil
+                maximumAge: nil,
+                now: now
             ),
             historicalStatusLine.harvestedAt > (cachedFetchedAt ?? .distantPast)
         {
@@ -159,16 +171,33 @@ struct CredentialStore: Sendable {
             if merged != windows {
                 windows = merged
                 fetchedAt = historicalStatusLine.harvestedAt
-                snapshotDetail = "5-hour/7-day snapshot · \(snapshotAge(historicalStatusLine.harvestedAt)) old"
+                snapshotDetail = "5-hour/7-day snapshot · \(snapshotAge(historicalStatusLine.harvestedAt, now: now)) old"
             }
         }
+
+        guard !windows.isEmpty else {
+            return AccountSnapshot.quotaUnavailable(
+                slot,
+                identity: registryIdentity.preferredDisplay ?? slot.localLabel,
+                plan: plan,
+                detail: "The previous local quota window has reset. Waiting for a new snapshot from this account.",
+                refreshedAt: fetchedAt
+            )
+        }
+
+        let snapshotState = claudeSnapshotState(
+            fetchedAt: fetchedAt,
+            now: now
+        )
 
         if
             snapshotDetail == nil,
             let fetchedAt,
-            Date().timeIntervalSince(fetchedAt) > Self.statusLineSnapshotLifetime
+            snapshotState == .stale
         {
-            snapshotDetail = "Local quota snapshot · \(snapshotAge(fetchedAt)) old"
+            snapshotDetail = "Local quota snapshot · \(snapshotAge(fetchedAt, now: now)) old"
+        } else if snapshotDetail == nil, fetchedAt == nil {
+            snapshotDetail = "Local quota snapshot · source time unavailable"
         }
 
         let providerAccountID = (account?["accountUuid"] as? String)
@@ -179,7 +208,7 @@ struct CredentialStore: Sendable {
             slot: slot,
             identity: registryIdentity.preferredDisplay ?? slot.localLabel,
             plan: plan,
-            state: .cached,
+            state: snapshotState,
             windows: windows,
             fableUsage: fableUsage,
             providerAccountID: providerAccountID,
@@ -572,7 +601,7 @@ struct CredentialStore: Sendable {
         return observed
     }
 
-    private func snapshotAge(_ capturedAt: Date, now: Date = Date()) -> String {
+    private func snapshotAge(_ capturedAt: Date, now: Date) -> String {
         let totalMinutes = max(
             0,
             Int(now.timeIntervalSince(capturedAt) / 60)
@@ -589,6 +618,17 @@ struct CredentialStore: Sendable {
         return "\(minutes)m"
     }
 
+    func claudeSnapshotState(
+        fetchedAt: Date?,
+        now: Date = Date()
+    ) -> AccountState {
+        guard let fetchedAt else { return .stale }
+        return now.timeIntervalSince(fetchedAt)
+            <= Self.statusLineSnapshotLifetime
+            ? .cached
+            : .stale
+    }
+
     private func claudePlan(from account: [String: Any]?) -> String {
         guard let organizationType = account?["organizationType"] as? String else {
             return "Claude"
@@ -599,15 +639,26 @@ struct CredentialStore: Sendable {
             .capitalized
     }
 
-    private func usageWindow(from raw: Any?, id: String, title: String) -> UsageWindow? {
+    func usageWindow(
+        from raw: Any?,
+        id: String,
+        title: String,
+        now: Date = Date()
+    ) -> UsageWindow? {
         guard let object = raw as? [String: Any], let used = object["utilization"] as? Double else {
             return nil
         }
         let resetAt = (object["resets_at"] as? String).flatMap(Self.parseISO8601)
+        if let resetAt, resetAt <= now {
+            return nil
+        }
         return UsageWindow(id: id, title: title, usedPercent: used, resetAt: resetAt)
     }
 
-    func fableUsageWindow(from utilization: [String: Any]) -> UsageWindow? {
+    func fableUsageWindow(
+        from utilization: [String: Any],
+        now: Date = Date()
+    ) -> UsageWindow? {
         guard let limits = utilization["limits"] as? [[String: Any]] else {
             return nil
         }
@@ -631,11 +682,16 @@ struct CredentialStore: Sendable {
             return nil
         }
 
+        let resetAt = (selected["resets_at"] as? String)
+            .flatMap(Self.parseISO8601)
+        if let resetAt, resetAt <= now {
+            return nil
+        }
         return UsageWindow(
             id: "fable-weekly",
             title: "Fable usage",
             usedPercent: percent,
-            resetAt: (selected["resets_at"] as? String).flatMap(Self.parseISO8601)
+            resetAt: resetAt
         )
     }
 

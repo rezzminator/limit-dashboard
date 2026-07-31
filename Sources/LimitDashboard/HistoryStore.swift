@@ -60,10 +60,12 @@ struct HistoryStore: Sendable {
 
     func record(_ snapshots: [AccountSnapshot], at capturedAt: Date) throws {
         let measurements = snapshots.flatMap { snapshot -> [Measurement] in
+            let sourceCapturedAt = snapshot.refreshedAt ?? capturedAt
             var values = snapshot.windows.enumerated().map { index, window in
                 Measurement(
                     slotID: snapshot.slot.id,
                     metricID: window.id,
+                    sourceCapturedAt: sourceCapturedAt,
                     isPrimary: index == 0,
                     usedPercent: window.normalizedUsedPercent,
                     remainingPercent: window.remainingPercent
@@ -74,6 +76,7 @@ struct HistoryStore: Sendable {
                     Measurement(
                         slotID: snapshot.slot.id,
                         metricID: fable.id,
+                        sourceCapturedAt: sourceCapturedAt,
                         isPrimary: false,
                         usedPercent: fable.normalizedUsedPercent,
                         remainingPercent: fable.remainingPercent
@@ -82,11 +85,47 @@ struct HistoryStore: Sendable {
             }
             return values
         }
-        guard !measurements.isEmpty else { return }
-
         try withDatabase { database in
             try execute(database, "BEGIN IMMEDIATE")
             do {
+                let reconcile = """
+                    DELETE FROM quota_snapshots
+                    WHERE slot_id = ? AND captured_at > ?
+                    """
+                var reconcileStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(
+                    database,
+                    reconcile,
+                    -1,
+                    &reconcileStatement,
+                    nil
+                ) == SQLITE_OK, let reconcileStatement else {
+                    throw sqliteError(database)
+                }
+                defer { sqlite3_finalize(reconcileStatement) }
+
+                for snapshot in snapshots {
+                    guard let sourceCapturedAt = snapshot.refreshedAt else {
+                        continue
+                    }
+                    sqlite3_reset(reconcileStatement)
+                    sqlite3_clear_bindings(reconcileStatement)
+                    try bind(
+                        snapshot.slot.id,
+                        to: 1,
+                        statement: reconcileStatement,
+                        database: database
+                    )
+                    sqlite3_bind_double(
+                        reconcileStatement,
+                        2,
+                        sourceCapturedAt.timeIntervalSince1970
+                    )
+                    guard sqlite3_step(reconcileStatement) == SQLITE_DONE else {
+                        throw sqliteError(database)
+                    }
+                }
+
                 let insert = """
                     INSERT INTO quota_snapshots (
                         slot_id,
@@ -110,14 +149,15 @@ struct HistoryStore: Sendable {
                 }
                 defer { sqlite3_finalize(statement) }
 
-                let capturedSeconds = capturedAt.timeIntervalSince1970
-                let minuteBucket = Int64(capturedSeconds / 60) * 60
                 for measurement in measurements {
+                    let sourceSeconds =
+                        measurement.sourceCapturedAt.timeIntervalSince1970
+                    let minuteBucket = Int64(sourceSeconds / 60) * 60
                     sqlite3_reset(statement)
                     sqlite3_clear_bindings(statement)
                     try bind(measurement.slotID, to: 1, statement: statement, database: database)
                     try bind(measurement.metricID, to: 2, statement: statement, database: database)
-                    sqlite3_bind_double(statement, 3, capturedSeconds)
+                    sqlite3_bind_double(statement, 3, sourceSeconds)
                     sqlite3_bind_int64(statement, 4, minuteBucket)
                     sqlite3_bind_int(statement, 5, measurement.isPrimary ? 1 : 0)
                     sqlite3_bind_double(statement, 6, measurement.usedPercent)
@@ -140,7 +180,7 @@ struct HistoryStore: Sendable {
                 sqlite3_bind_double(
                     prune,
                     1,
-                    capturedSeconds - Self.retentionWindow
+                    capturedAt.timeIntervalSince1970 - Self.retentionWindow
                 )
                 let pruneResult = sqlite3_step(prune)
                 sqlite3_finalize(prune)
@@ -300,6 +340,7 @@ struct HistoryStore: Sendable {
     private struct Measurement {
         let slotID: String
         let metricID: String
+        let sourceCapturedAt: Date
         let isPrimary: Bool
         let usedPercent: Double
         let remainingPercent: Double

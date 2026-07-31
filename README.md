@@ -77,6 +77,11 @@ addresses, provider account IDs, tokens, credentials, plan labels, or raw
 provider responses. Writes are upserted per account/metric/minute and retained
 for 90 days.
 
+History timestamps come from each provider observation, not from the dashboard
+poll. Re-reading one unchanged local snapshot does not extend a flat line into
+the future. When the app recognizes legacy poll-stamped rows newer than the
+latest real source observation, it removes those invalid rows.
+
 ## Build from source
 
 ```sh
@@ -97,8 +102,10 @@ Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
   is accepted only for the matching config slot and while its reset window is
   still active. Samples up to one hour old are current local snapshots. If no
   current sample exists, a newer identity-matched active-window observation may
-  replace an older cache, but its age is shown explicitly. Within the same
-  reset window, an older/lower observation can never reduce the displayed Used
+  replace an older cache internally, but quota values are hidden once their
+  selected source is more than one hour old. The card changes to **Stale**,
+  reports the source age, and waits for a new local snapshot. Within the same
+  reset window, an older/lower observation can never reduce the selected Used
   percentage. If the state file was rewritten after harvest, the app requires
   the local registry backups to prove that the same account identity remained
   assigned to that slot throughout.
@@ -124,6 +131,11 @@ profile cache, the dashboard picks up the new value automatically. Claude Code
 documents `rate_limits.*.used_percentage` as the consumed percentage from 0 to
 100 and `resets_at` as Unix epoch seconds:
 <https://code.claude.com/docs/en/statusline#rate-limit-usage>.
+
+The refresh interval is a local **check** interval, not a promise that a
+provider created new data. The footer therefore says **Checked**, source age is
+evaluated independently of polling time, and expired/stale Claude percentages
+are never presented as current.
 
 Each Claude card also shows **Fable usage**, the model-specific weekly limit,
 when its state-file cache contains this exact entry:

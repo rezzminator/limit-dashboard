@@ -30,15 +30,20 @@ final class DashboardModel: ObservableObject {
     var issueCount: Int {
         let unavailable = snapshots.filter { $0.state == .unavailable }.count
         let unavailableQuota = snapshots.filter { $0.state == .quotaUnavailable }.count
+        let stale = snapshots.filter { $0.state == .stale }.count
         let hasDuplicateGroup = snapshots.contains { $0.duplicatePeer != nil }
-        return unavailable + unavailableQuota + (hasDuplicateGroup ? 1 : 0)
+        return unavailable + unavailableQuota + stale + (hasDuplicateGroup ? 1 : 0)
     }
 
     var issueSummary: String? {
         let unavailable = snapshots.filter { $0.state == .unavailable }.count
         let unavailableQuota = snapshots.filter { $0.state == .quotaUnavailable }.count
         let duplicates = snapshots.filter { $0.duplicatePeer != nil }.count
-        if unavailable == 0, unavailableQuota == 0, duplicates == 0 { return nil }
+        if unavailable == 0,
+           unavailableQuota == 0,
+           duplicates == 0 {
+            return nil
+        }
 
         var parts: [String] = []
         if unavailable > 0 {

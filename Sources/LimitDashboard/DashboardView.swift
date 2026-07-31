@@ -156,7 +156,7 @@ struct DashboardView: View {
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.secondary)
             } else if let lastUpdated = model.lastUpdated {
-                Text("Updated \(lastUpdated, style: .relative)")
+                Text("Checked \(lastUpdated, style: .relative)")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.secondary)
             }
@@ -917,7 +917,7 @@ private struct AccountCard: View, Equatable {
                 Spacer()
 
                 if let headlineWindow,
-                   snapshot.state != .loading {
+                   snapshot.canDisplayQuotaValues {
                     VStack(alignment: .trailing, spacing: 1) {
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             Text(
@@ -945,6 +945,8 @@ private struct AccountCard: View, Equatable {
 
             if snapshot.state == .loading {
                 loadingContent
+            } else if snapshot.state == .stale {
+                staleContent
             } else if let headlineWindow {
                 usageContent(headlineWindow)
             } else {
@@ -1027,6 +1029,34 @@ private struct AccountCard: View, Equatable {
                 Text(snapshot.slot.provider == .claude
                      ? "Waiting for this account’s own local quota snapshot."
                      : "Open Codex and sign in again.")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(accent)
+            }
+        }
+    }
+
+    private var staleContent: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "clock.badge.exclamationmark")
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Quota snapshot expired")
+                    .font(
+                        .system(
+                            .title3,
+                            design: .rounded,
+                            weight: .bold
+                        )
+                    )
+                Text(
+                    snapshot.detail
+                        ?? "This account’s local quota source is no longer current."
+                )
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text("Waiting for this account to produce a new local snapshot.")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(accent)
             }
@@ -1142,6 +1172,7 @@ private struct StateBadge: View {
         switch state {
         case .live: .green
         case .cached: .orange
+        case .stale: .orange
         case .quotaUnavailable: .orange
         case .loading: .blue
         case .unavailable: .red

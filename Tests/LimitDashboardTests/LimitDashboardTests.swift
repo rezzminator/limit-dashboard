@@ -432,6 +432,61 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertEqual(RefreshPolicy.validated(99_999), 3_600)
     }
 
+    func testClaudeSnapshotFreshnessIsNotConfusedWithPollingTime() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let store = CredentialStore()
+        XCTAssertEqual(
+            store.claudeSnapshotState(
+                fetchedAt: now.addingTimeInterval(-30 * 60),
+                now: now
+            ),
+            .cached
+        )
+        XCTAssertEqual(
+            store.claudeSnapshotState(
+                fetchedAt: now.addingTimeInterval(-2 * 60 * 60),
+                now: now
+            ),
+            .stale
+        )
+        XCTAssertEqual(
+            store.claudeSnapshotState(fetchedAt: nil, now: now),
+            .stale
+        )
+    }
+
+    func testExpiredClaudeQuotaWindowsAreNotDisplayed() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let formatter = ISO8601DateFormatter()
+        let store = CredentialStore()
+        XCTAssertNil(
+            store.usageWindow(
+                from: [
+                    "utilization": 90.0,
+                    "resets_at": formatter.string(
+                        from: now.addingTimeInterval(-1)
+                    ),
+                ],
+                id: "seven-day",
+                title: "7-day",
+                now: now
+            )
+        )
+        XCTAssertNotNil(
+            store.usageWindow(
+                from: [
+                    "utilization": 10.0,
+                    "resets_at": formatter.string(
+                        from: now.addingTimeInterval(60)
+                    ),
+                ],
+                id: "seven-day",
+                title: "7-day",
+                now: now
+            )
+        )
+    }
+
     func testUnchangedPollSnapshotComparesEqualDespiteNewFetchTime() throws {
         let slot = try XCTUnwrap(AccountSlot.configured.first)
         let window = UsageWindow(
@@ -469,6 +524,34 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertNotEqual(first, nextPoll)
     }
 
+    func testStaleSnapshotCannotDisplayQuotaValues() throws {
+        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let window = UsageWindow(
+            id: "seven-day",
+            title: "7-day",
+            usedPercent: 91,
+            resetAt: Date(timeIntervalSince1970: 2_000_100_000)
+        )
+        let stale = AccountSnapshot(
+            id: slot.id,
+            slot: slot,
+            identity: "account",
+            plan: "Max",
+            state: .stale,
+            windows: [window],
+            fableUsage: nil,
+            providerAccountID: nil,
+            detail: "1d old",
+            refreshedAt: Date(timeIntervalSince1970: 2_000_000_000),
+            duplicatePeer: nil
+        )
+        XCTAssertFalse(stale.canDisplayQuotaValues)
+
+        var current = stale
+        current.state = .cached
+        XCTAssertTrue(current.canDisplayQuotaValues)
+    }
+
     func testHistoryStoreAggregatesPrimaryUsedValuesWithoutIdentityData() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "limit-dashboard-history-\(UUID().uuidString)",
@@ -480,7 +563,10 @@ final class LimitDashboardTests: XCTestCase {
         let slot = try XCTUnwrap(AccountSlot.configured.first)
         let start = Date(timeIntervalSince1970: 1_800_000_123)
 
-        func snapshot(usedPercent: Double) -> AccountSnapshot {
+        func snapshot(
+            usedPercent: Double,
+            sourceCapturedAt: Date
+        ) -> AccountSnapshot {
             AccountSnapshot(
                 id: slot.id,
                 slot: slot,
@@ -503,14 +589,22 @@ final class LimitDashboardTests: XCTestCase {
                 ),
                 providerAccountID: "provider-account-id",
                 detail: nil,
-                refreshedAt: start,
+                refreshedAt: sourceCapturedAt,
                 duplicatePeer: nil
             )
         }
 
-        try store.record([snapshot(usedPercent: 20)], at: start)
         try store.record(
-            [snapshot(usedPercent: 40)],
+            [snapshot(usedPercent: 20, sourceCapturedAt: start)],
+            at: start
+        )
+        try store.record(
+            [
+                snapshot(
+                    usedPercent: 40,
+                    sourceCapturedAt: start.addingTimeInterval(60)
+                )
+            ],
             at: start.addingTimeInterval(60)
         )
         let points = try store.loadPrimaryUsedPoints(
@@ -542,6 +636,62 @@ final class LimitDashboardTests: XCTestCase {
         let databaseText = String(decoding: databaseBytes, as: UTF8.self)
         XCTAssertFalse(databaseText.contains("private-email@example.com"))
         XCTAssertFalse(databaseText.contains("provider-account-id"))
+    }
+
+    func testRepeatedPollDoesNotExtendAStaleMeasurementThroughHistory() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-history-liveness-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = HistoryStore(
+            databaseURL: directory.appendingPathComponent("history.sqlite3")
+        )
+        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let sourceCapturedAt = Date(timeIntervalSince1970: 1_900_000_000)
+
+        func snapshot(refreshedAt: Date?) -> AccountSnapshot {
+            AccountSnapshot(
+                id: slot.id,
+                slot: slot,
+                identity: "account",
+                plan: "Plan",
+                state: .stale,
+                windows: [
+                    UsageWindow(
+                        id: "five-hour",
+                        title: "5-hour",
+                        usedPercent: 42,
+                        resetAt: sourceCapturedAt.addingTimeInterval(24 * 60 * 60)
+                    )
+                ],
+                fableUsage: nil,
+                providerAccountID: nil,
+                detail: "Stale",
+                refreshedAt: refreshedAt,
+                duplicatePeer: nil
+            )
+        }
+
+        try store.record(
+            [snapshot(refreshedAt: nil)],
+            at: sourceCapturedAt.addingTimeInterval(60 * 60)
+        )
+        try store.record(
+            [snapshot(refreshedAt: sourceCapturedAt)],
+            at: sourceCapturedAt.addingTimeInterval(2 * 60 * 60)
+        )
+        try store.record(
+            [snapshot(refreshedAt: sourceCapturedAt)],
+            at: sourceCapturedAt.addingTimeInterval(3 * 60 * 60)
+        )
+
+        let points = try store.loadPrimaryUsedPoints(
+            since: sourceCapturedAt.addingTimeInterval(-1)
+        )
+        XCTAssertEqual(points.count, 1)
+        XCTAssertEqual(points.first?.timestamp, sourceCapturedAt)
+        XCTAssertEqual(points.first?.value, 42)
     }
 
     func testQuotaStateHistoryKeepsIdleClaudeAccountsAtZeroUsed() throws {

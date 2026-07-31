@@ -1,6 +1,6 @@
 # Limit Dashboard status
 
-Snapshot verified on 2026-07-30 (Europe/Amsterdam).
+Snapshot verified on 2026-07-31 (Europe/Amsterdam).
 
 ## Dock installation
 
@@ -14,10 +14,10 @@ dashboard window.
 
 | Account | Dashboard source | Result |
 |---|---|---|
-| Claude Account 1 — `mrez9090@gmail.com` | `~/.claude.json` | **Cached**: 0% used / 100% remaining in the 5-hour window, 90% used / 10% remaining in the 7-day window, and 97% used / 3% remaining in the weekly Fable limit. The first card now renders correctly. |
-| Claude Account 2 — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` identity/Fable cache plus the newest identity-matched slot-2 `/tmp/cc-rate-limits` snapshot | **Aged local status-line snapshot**: 1% used / 99% remaining in the 5-hour window, **91% used / 9% remaining in the 7-day window**, and 26% used / 74% remaining in the cached weekly Fable limit. The card shows the snapshot age. |
-| Claude Account 3 — `reza@intuita.health` | `~/.claude3/.claude.json` | **Cached and matching**: 0% used / 100% remaining in the 5-hour window, 91% used / 9% remaining in the 7-day window, and 77% used / 23% remaining in the weekly Fable limit. |
-| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **46% remaining** / 54% used in the current window during the latest render. |
+| Claude Account 1 — `mrez9090@gmail.com` | `~/.claude.json` | **Stale**: local source is 2d 19h old. Percentages are suppressed until this account produces a new local snapshot. |
+| Claude Account 2 — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` and its identity-matched slot-2 `/tmp/cc-rate-limits` source | **Stale**: local source is 2d 19h old. Percentages are suppressed until this account produces a new local snapshot. |
+| Claude Account 3 — `reza@intuita.health` | `~/.claude3/.claude.json` | **Stale**: local source is 2d 18h old. Percentages are suppressed until this account produces a new local snapshot. |
+| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **43% remaining** / 57% used in the current window during the latest render. |
 
 Claude cache availability can change as local provider sessions rotate. The
 dashboard re-reads all three files on every selected interval. It derives the
@@ -94,7 +94,33 @@ session metadata, backups/history, Claude desktop support files, CodexBar
 caches, and local usage-history files. It was correctly rendered as
 authenticated-but-quota-unavailable while its cache belonged to account two.
 The active `.claude3` process later wrote its own matching cache, and the same
-stable third card updated in place to the 0% / 91% / 77% values above.
+stable third card updated in place to the 0% / 91% / 77% values observed at
+that time.
+
+## Liveness correction
+
+The 10–3600 second setting controls how often the app checks its sources; it
+does not make an unchanged provider cache current. Previously the footer said
+`Updated` after each poll, expired Claude windows remained visible, and the
+history database saved the same aged percentage at every polling minute. That
+made stale data look live and fabricated a continuing quota-history line.
+
+The dashboard now:
+
+- classifies Claude source age independently from the polling clock;
+- displays quota values only for live or current local snapshots;
+- replaces aged Claude metrics with a **Quota snapshot expired** state and the
+  exact source age;
+- reports stale cards in the header issue count;
+- says **Checked** after polling instead of **Updated**;
+- rejects cached windows whose reset timestamp has passed; and
+- records history at the real provider observation timestamp, reconciling away
+  later legacy rows that represented repeated polls.
+
+With the current authorized non-Keychain sources, Codex is live and the three
+Claude sources are aged. The app therefore shows no Claude percentages until
+each corresponding local Claude process produces a new status-line/cache
+snapshot. It performs no Anthropic request and does not access Keychain.
 
 ## Refresh rendering correction
 
@@ -217,20 +243,17 @@ Accessibility inspection after opening and after an automatic refresh returned
 ## Verification
 
 - Release build: passed.
-- Swift tests: 22 executed, 21 passed and 1 opt-in live test skipped by default.
+- Swift tests: 26 executed, 25 passed and 1 opt-in live test skipped by default.
 - Opt-in live Codex integration test: passed.
 - App signature and `Info.plist`: passed.
 - Binary linkage check: no Security framework.
 - Source audit: no `SecItem`, `kSec`, Claude Keychain service, or Anthropic
   endpoint path.
-- Window render: visually inspected with all four compact cards, full emails,
-  local states, the corrected first account, the second account at 91%
-  seven-day Used from its age-labeled status-line snapshot, the matching third
-  account at 91% seven-day Used, remaining-first headlines, the persisted
-  interval control, per-window reset countdowns, Claude Fable usage, live
-  Codex state, distinct
-  quota-snapshot and 30-day Vertex-token charts, and the summary-only
-  full-width Vertex estimate card.
+- Window render: visually inspected with all four equal-height cards, full
+  emails, three explicit stale Claude states with no old percentages, live
+  Codex data, the header issue count, the persisted interval control, a
+  source-timestamped quota chart, the 30-day Vertex chart/summary, and the
+  `Checked` footer.
 - Automatic-refresh render: before/after captures showed no loading replacement
   or layout/card redraw; only the freshness text advanced.
 

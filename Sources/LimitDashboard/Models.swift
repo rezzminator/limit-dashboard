@@ -9,6 +9,7 @@ enum AccountState: String, Hashable, Sendable {
     case loading
     case live
     case cached
+    case stale
     case quotaUnavailable
     case unavailable
 
@@ -17,6 +18,7 @@ enum AccountState: String, Hashable, Sendable {
         case .loading: "Refreshing"
         case .live: "Live"
         case .cached: "Cached"
+        case .stale: "Stale"
         case .quotaUnavailable: "Quota unavailable"
         case .unavailable: "Unavailable"
         }
@@ -152,6 +154,10 @@ struct AccountSnapshot: Identifiable, Equatable, Sendable {
     var refreshedAt: Date?
     var duplicatePeer: String?
 
+    var canDisplayQuotaValues: Bool {
+        state == .live || state == .cached
+    }
+
     static func loading(_ slot: AccountSlot) -> AccountSnapshot {
         AccountSnapshot(
             id: slot.id,
@@ -193,7 +199,8 @@ struct AccountSnapshot: Identifiable, Equatable, Sendable {
         _ slot: AccountSlot,
         identity: String,
         plan: String,
-        detail: String
+        detail: String,
+        refreshedAt: Date? = Date()
     ) -> AccountSnapshot {
         AccountSnapshot(
             id: slot.id,
@@ -205,7 +212,7 @@ struct AccountSnapshot: Identifiable, Equatable, Sendable {
             fableUsage: nil,
             providerAccountID: nil,
             detail: detail,
-            refreshedAt: Date(),
+            refreshedAt: refreshedAt,
             duplicatePeer: nil
         )
     }
