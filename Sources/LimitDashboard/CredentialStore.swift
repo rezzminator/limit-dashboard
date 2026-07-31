@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 struct ClaudeStatusLineRateLimits: Sendable, Equatable {
     let fiveHour: UsageWindow?
@@ -42,7 +43,10 @@ struct CredentialStore: Sendable {
         let tokens: Tokens
     }
 
-    private static let statusLineSnapshotLifetime: TimeInterval = 60 * 60
+    /// A status-line harvest is rewritten every few seconds while a session is
+    /// rendering, so a sample this recent is the provider's current state.
+    static let statusLineLiveWindow: TimeInterval = 5 * 60
+    static let statusLineSnapshotLifetime: TimeInterval = 60 * 60
     private let claudeRateLimitsDirectory: URL
     private let claudeBackupsDirectoryOverride: URL?
 
@@ -70,6 +74,7 @@ struct CredentialStore: Sendable {
         for slot: AccountSlot,
         identity: LocalIdentity,
         detail: String? = nil,
+        note: String? = nil,
         now: Date = Date()
     ) -> AccountSnapshot? {
         guard let url = claudeStateURL(for: slot) else { return nil }
@@ -103,11 +108,19 @@ struct CredentialStore: Sendable {
             )
         }
 
+        let cachedFetchedAt: Date?
+        if let milliseconds = cached["fetchedAtMs"] as? Double {
+            cachedFetchedAt = Date(timeIntervalSince1970: milliseconds / 1_000)
+        } else {
+            cachedFetchedAt = nil
+        }
+
         var windows: [UsageWindow] = []
         if let fiveHour = usageWindow(
             from: utilization["five_hour"],
             id: "five-hour",
             title: "5-hour",
+            sourceFetchedAt: cachedFetchedAt,
             now: now
         ) {
             windows.append(fiveHour)
@@ -116,26 +129,26 @@ struct CredentialStore: Sendable {
             from: utilization["seven_day"],
             id: "seven-day",
             title: "7-day",
+            sourceFetchedAt: cachedFetchedAt,
             now: now
         ) {
             windows.append(sevenDay)
         }
-        let fableUsage = fableUsageWindow(from: utilization, now: now)
+        let fableUsage = fableUsageWindow(
+            from: utilization,
+            sourceFetchedAt: cachedFetchedAt,
+            now: now
+        )
 
-        let cachedFetchedAt: Date?
-        if let milliseconds = cached["fetchedAtMs"] as? Double {
-            cachedFetchedAt = Date(timeIntervalSince1970: milliseconds / 1_000)
-        } else {
-            cachedFetchedAt = nil
-        }
         var fetchedAt = cachedFetchedAt
-        var snapshotDetail = detail
+        var sourceName = "Local quota snapshot"
+        let currentAccountID = account?["accountUuid"] as? String
         if
             let stateModifiedAt,
             let statusLine = localClaudeRateLimits(
                 for: slot,
                 stateModifiedAt: stateModifiedAt,
-                currentAccountID: account?["accountUuid"] as? String,
+                currentAccountID: currentAccountID,
                 now: now
             )
         {
@@ -144,20 +157,13 @@ struct CredentialStore: Sendable {
                 statusLine: statusLine
             )
             fetchedAt = statusLine.harvestedAt
-            snapshotDetail = "Claude Code status-line quota snapshot"
-        } else if hasFreshClaudeRateLimitCandidate(for: slot, now: now) {
-            return AccountSnapshot.quotaUnavailable(
-                slot,
-                identity: registryIdentity.preferredDisplay ?? slot.localLabel,
-                plan: plan,
-                detail: "A fresh local quota sample exists, but its account association could not be proven. Older cached percentages were not shown."
-            )
+            sourceName = "Claude Code status line"
         } else if
             let stateModifiedAt,
             let historicalStatusLine = localClaudeRateLimits(
                 for: slot,
                 stateModifiedAt: stateModifiedAt,
-                currentAccountID: account?["accountUuid"] as? String,
+                currentAccountID: currentAccountID,
                 maximumAge: nil,
                 now: now
             ),
@@ -171,8 +177,18 @@ struct CredentialStore: Sendable {
             if merged != windows {
                 windows = merged
                 fetchedAt = historicalStatusLine.harvestedAt
-                snapshotDetail = "5-hour/7-day snapshot · \(snapshotAge(historicalStatusLine.harvestedAt, now: now)) old"
+                sourceName = "Claude Code status line"
             }
+        } else if hasFreshClaudeRateLimitCandidate(for: slot, now: now) {
+            // A recent sample exists for this slot but the registry proves it
+            // belonged to a different account, so neither it nor the cache it
+            // would have replaced can be attributed to the account shown here.
+            return AccountSnapshot.quotaUnavailable(
+                slot,
+                identity: registryIdentity.preferredDisplay ?? slot.localLabel,
+                plan: plan,
+                detail: "A recent local quota sample belongs to a different account. Cached percentages were not shown."
+            )
         }
 
         guard !windows.isEmpty else {
@@ -180,7 +196,7 @@ struct CredentialStore: Sendable {
                 slot,
                 identity: registryIdentity.preferredDisplay ?? slot.localLabel,
                 plan: plan,
-                detail: "The previous local quota window has reset. Waiting for a new snapshot from this account.",
+                detail: "Every known quota window for this account has reset. Waiting for a new snapshot.",
                 refreshedAt: fetchedAt
             )
         }
@@ -190,15 +206,21 @@ struct CredentialStore: Sendable {
             now: now
         )
 
-        if
-            snapshotDetail == nil,
-            let fetchedAt,
-            snapshotState == .stale
-        {
-            snapshotDetail = "Local quota snapshot · \(snapshotAge(fetchedAt, now: now)) old"
-        } else if snapshotDetail == nil, fetchedAt == nil {
-            snapshotDetail = "Local quota snapshot · source time unavailable"
+        let baseDetail: String = if let detail {
+            detail
+        } else if let fetchedAt {
+            switch snapshotState {
+            case .live:
+                "\(sourceName) · current"
+            default:
+                "\(sourceName) · read \(snapshotAge(fetchedAt, now: now)) ago"
+            }
+        } else {
+            "\(sourceName) · source time unavailable"
         }
+        // The note explains why the live provider reading was unavailable, so an
+        // aged card says what to do about it instead of only how old it is.
+        let snapshotDetail = note.map { "\(baseDetail) · \($0)" } ?? baseDetail
 
         let providerAccountID = (account?["accountUuid"] as? String)
             ?? (cached["accountUuid"] as? String)
@@ -218,13 +240,213 @@ struct CredentialStore: Sendable {
         )
     }
 
-    private func loadClaude(_ slot: AccountSlot) -> LoadedCredential {
+    /// Whether to query Claude's usage endpoint directly.
+    ///
+    /// Off by default. When enabled, the provider layer uses the bounded
+    /// curl_cffi transport bundled with the app. While disabled the app reads no
+    /// Claude Keychain item and makes no Claude request; the status-line harvest
+    /// remains the best available source.
+    static var claudeProviderQueriesEnabled: Bool {
+        ProcessInfo.processInfo.environment["LIMIT_DASHBOARD_CLAUDE_API"] == "1"
+    }
+
+    private func loadClaude(
+        _ slot: AccountSlot,
+        now: Date = Date()
+    ) -> LoadedCredential {
         let identity = readClaudeIdentity(slot)
+        guard Self.claudeProviderQueriesEnabled else {
+            return .failed(
+                slot,
+                identity,
+                "This signed-in account has no local quota snapshot yet."
+            )
+        }
+        guard let credential = claudeKeychainCredential(for: slot, identity: identity) else {
+            return .failed(
+                slot,
+                identity,
+                "no stored session to query the provider with"
+            )
+        }
+        if credential.isUsable(now: now) {
+            return .claude(slot, credential)
+        }
+
+        // The token has expired. Rather than exchange the refresh token itself —
+        // which rotates it, and would strand Claude Code with an invalidated copy
+        // unless this app also wrote the replacement back — ask Claude Code to
+        // renew its own session. `auth status` performs no model call, so this
+        // costs no quota, and credential writing stays entirely with the tool
+        // that owns it.
+        if
+            renewClaudeSession(for: slot),
+            let renewed = claudeKeychainCredential(for: slot, identity: identity),
+            renewed.isUsable(now: now)
+        {
+            return .claude(slot, renewed)
+        }
+
+        let expiredFor = credential.expiresAt.map {
+            " \(snapshotAge($0, now: now)) ago"
+        } ?? ""
         return .failed(
             slot,
             identity,
-            "This signed-in account has no local quota snapshot yet."
+            "signed-in session expired\(expiredFor) and could not be renewed · open this account once"
         )
+    }
+
+    /// Asks Claude Code to validate — and therefore renew — the session for one
+    /// config directory. Returns true when the stored credential changed.
+    private func renewClaudeSession(for slot: AccountSlot) -> Bool {
+        guard
+            let configDirectory = claudeConfigDirectory(for: slot),
+            SessionRenewalThrottle.shared.beginAttempt(for: configDirectory),
+            let binary = Self.claudeBinaryURL()
+        else {
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = binary
+        // Only ever `status`. `login`/`logout` would change the sign-in state.
+        process.arguments = ["auth", "status"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CLAUDE_CONFIG_DIR"] = configDirectory
+        process.environment = environment
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+
+        // A wedged helper must not hold the refresh cycle open indefinitely.
+        let deadline = Date().addingTimeInterval(20)
+        while process.isRunning, Date() < deadline {
+            usleep(50_000)
+        }
+        if process.isRunning {
+            process.terminate()
+            return false
+        }
+        _ = try? output.fileHandleForReading.readToEnd()
+        guard process.terminationStatus == 0 else { return false }
+
+        // Claude Code may have written a new token; drop the memoised copy so the
+        // next read sees it.
+        KeychainCache.shared.invalidate(
+            Self.claudeKeychainService(forConfigDirectory: configDirectory)
+        )
+        return true
+    }
+
+    private static func claudeBinaryURL() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent(".local/bin/claude"),
+            URL(fileURLWithPath: "/opt/homebrew/bin/claude"),
+            URL(fileURLWithPath: "/usr/local/bin/claude"),
+        ]
+        return candidates.first {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }
+    }
+
+    /// The Keychain service name Claude Code uses for a config directory. The
+    /// default directory keeps the bare name; every other one is suffixed with
+    /// the first eight hex digits of the SHA-256 of its absolute path.
+    static func claudeKeychainService(forConfigDirectory path: String) -> String {
+        let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude", isDirectory: true)
+            .path
+        guard path != defaultDirectory else { return "Claude Code-credentials" }
+        let digest = SHA256.hash(data: Data(path.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "Claude Code-credentials-\(digest.prefix(8))"
+    }
+
+    func claudeConfigDirectory(for slot: AccountSlot) -> String? {
+        guard let stateURL = claudeStateURL(for: slot) else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        // Slot one's registry is the root `~/.claude.json`, but its config
+        // directory — and therefore its Keychain item — is `~/.claude`.
+        if stateURL.deletingLastPathComponent().path == home.path {
+            return home.appendingPathComponent(".claude", isDirectory: true).path
+        }
+        return stateURL.deletingLastPathComponent().path
+    }
+
+    private func claudeKeychainCredential(
+        for slot: AccountSlot,
+        identity: LocalIdentity
+    ) -> ClaudeCredential? {
+        guard
+            let configDirectory = claudeConfigDirectory(for: slot),
+            let secret = keychainSecret(
+                service: Self.claudeKeychainService(
+                    forConfigDirectory: configDirectory
+                )
+            ),
+            let root = try? JSONSerialization.jsonObject(with: secret)
+                as? [String: Any],
+            let oauth = root["claudeAiOauth"] as? [String: Any],
+            let accessToken = oauth["accessToken"] as? String,
+            !accessToken.isEmpty
+        else {
+            return nil
+        }
+
+        let expiresAt = (oauth["expiresAt"] as? Double)
+            .map { Date(timeIntervalSince1970: $0 / 1_000) }
+        let account = claudeAccount(for: slot)
+        return ClaudeCredential(
+            accessToken: accessToken,
+            expiresAt: expiresAt,
+            identity: identity,
+            plan: claudePlan(from: account),
+            providerAccountID: account?["accountUuid"] as? String
+        )
+    }
+
+    private func claudeAccount(for slot: AccountSlot) -> [String: Any]? {
+        guard
+            let url = claudeStateURL(for: slot),
+            let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+            let root = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any]
+        else {
+            return nil
+        }
+        return root["oauthAccount"] as? [String: Any]
+    }
+
+    private func keychainSecret(service: String) -> Data? {
+        // A remembered lookup — including a remembered refusal — is returned
+        // without querying again, so the panel is never raised twice.
+        if let remembered = KeychainCache.shared.remembered(for: service) {
+            return remembered.data
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: NSUserName(),
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else {
+            KeychainCache.shared.storeFailure(for: service)
+            return nil
+        }
+        KeychainCache.shared.store(data, for: service)
+        return data
     }
 
     private func loadCodex(_ slot: AccountSlot) -> LoadedCredential {
@@ -351,12 +573,12 @@ struct CredentialStore: Sendable {
                 age >= -60,
                 maximumAge.map({ age <= $0 }) ?? true,
                 harvestedAt >= stateModifiedAt
-                    || registryIdentityWasContinuous(
+                    || registryIdentityContinuity(
                         for: slot,
                         currentAccountID: currentAccountID,
                         from: harvestedAt,
                         through: stateModifiedAt
-                    )
+                    ) != .contradicted
             else {
                 return nil
             }
@@ -381,12 +603,20 @@ struct CredentialStore: Sendable {
         )
         guard fiveHour != nil || sevenDay != nil else { return nil }
 
-        let harvestedAt = samples
-            .map { Date(timeIntervalSince1970: $0.harvestedAt) }
-            .max() ?? now
+        // The age reported to the UI has to belong to the samples that actually
+        // supplied these values. Taking the newest harvest across every file
+        // would let an unrelated sample — one rejected for an expired window, or
+        // one carrying a lower reading — make this reading look current.
+        guard
+            let harvestedAt = [fiveHour?.harvestedAt, sevenDay?.harvestedAt]
+                .compactMap({ $0 })
+                .max()
+        else {
+            return nil
+        }
         return ClaudeStatusLineRateLimits(
-            fiveHour: fiveHour,
-            sevenDay: sevenDay,
+            fiveHour: fiveHour?.window,
+            sevenDay: sevenDay?.window,
             harvestedAt: harvestedAt
         )
     }
@@ -436,12 +666,34 @@ struct CredentialStore: Sendable {
         }
     }
 
-    private func registryIdentityWasContinuous(
+    enum RegistryIdentityContinuity {
+        /// A retained backup predates the harvest and names the current account.
+        case proven
+        /// Nothing on disk reaches back far enough to decide, and nothing
+        /// contradicts the sample either.
+        case unproven
+        /// The registry demonstrably belonged to a different account across the
+        /// harvest instant, so the sample cannot describe this account.
+        case contradicted
+    }
+
+    /// Answers whether the account signed into this config directory changed
+    /// between a sample's harvest and the current registry state.
+    ///
+    /// Claude rewrites `.claude.json` constantly for reasons unrelated to
+    /// identity, so whole-file modification time proves nothing on its own; the
+    /// retained backups are the only account-change evidence available. Those
+    /// backups rotate, so evidence older than the retained set simply does not
+    /// exist. This reports absence of evidence as `unproven` rather than as an
+    /// account change: demanding positive proof made every observation older
+    /// than the oldest retained backup permanently unusable, which is what left
+    /// accounts pinned to a days-old reading with no way to recover.
+    private func registryIdentityContinuity(
         for slot: AccountSlot,
         currentAccountID: String?,
         from harvestedAt: Date,
         through stateModifiedAt: Date
-    ) -> Bool {
+    ) -> RegistryIdentityContinuity {
         guard
             let currentAccountID,
             !currentAccountID.isEmpty,
@@ -455,7 +707,7 @@ struct CredentialStore: Sendable {
                 options: []
             )
         else {
-            return false
+            return .unproven
         }
 
         var observations: [(date: Date, accountID: String)] = []
@@ -483,17 +735,27 @@ struct CredentialStore: Sendable {
             observations.append((modifiedAt, accountID))
         }
 
+        // A backup written at or after the harvest that names a different
+        // account proves the registry was not this account across that instant.
+        let contradictedAfterHarvest = observations
+            .filter { $0.date > harvestedAt }
+            .contains { $0.accountID != currentAccountID }
+        if contradictedAfterHarvest {
+            return .contradicted
+        }
+
         guard
             let preceding = observations
                 .filter({ $0.date <= harvestedAt })
-                .max(by: { $0.date < $1.date }),
-            preceding.accountID == currentAccountID
+                .max(by: { $0.date < $1.date })
         else {
-            return false
+            // The backups have rotated past the harvest. Nothing on either side
+            // disagrees with the sample, so it stays usable.
+            return .unproven
         }
-        return observations
-            .filter { $0.date > harvestedAt }
-            .allSatisfy { $0.accountID == currentAccountID }
+        // The registry held another account immediately before the harvest and
+        // holds this one now, so the switch straddles the harvest instant.
+        return preceding.accountID == currentAccountID ? .proven : .contradicted
     }
 
     private func claudeBackupsURL(for slot: AccountSlot) -> URL? {
@@ -512,6 +774,15 @@ struct CredentialStore: Sendable {
             .appendingPathComponent("backups", isDirectory: true)
     }
 
+    private struct SelectedStatusLineWindow {
+        let window: UsageWindow
+        let harvestedAt: Date
+    }
+
+    /// The status line writes one file per session, so several files can describe
+    /// the same account at different vintages. Within one reset window usage only
+    /// climbs, so the highest reading is the most advanced one — that is the
+    /// documented way to combine these files.
     private func selectStatusLineWindow(
         samples: [ClaudeStatusLineSample],
         used: KeyPath<ClaudeStatusLineSample, Double>,
@@ -519,7 +790,7 @@ struct CredentialStore: Sendable {
         id: String,
         title: String,
         now: Date
-    ) -> UsageWindow? {
+    ) -> SelectedStatusLineWindow? {
         let active = samples.filter {
             Date(timeIntervalSince1970: $0[keyPath: reset]) > now
         }
@@ -543,11 +814,21 @@ struct CredentialStore: Sendable {
             return nil
         }
 
-        return UsageWindow(
-            id: id,
-            title: title,
-            usedPercent: selected[keyPath: used],
-            resetAt: Date(timeIntervalSince1970: selected[keyPath: reset])
+        // Ties on the reading itself are common while an account is idle. The
+        // newest file that carries the winning value is the honest age for it.
+        let harvestedAt = currentWindow
+            .filter { $0[keyPath: used] == selected[keyPath: used] }
+            .map(\.harvestedAt)
+            .max() ?? selected.harvestedAt
+
+        return SelectedStatusLineWindow(
+            window: UsageWindow(
+                id: id,
+                title: title,
+                usedPercent: selected[keyPath: used],
+                resetAt: Date(timeIntervalSince1970: selected[keyPath: reset])
+            ),
+            harvestedAt: Date(timeIntervalSince1970: harvestedAt)
         )
     }
 
@@ -618,15 +899,17 @@ struct CredentialStore: Sendable {
         return "\(minutes)m"
     }
 
+    /// Classifies how current a quota reading is, independently of how often the
+    /// dashboard polls. Polling an unchanged source does not make it newer.
     func claudeSnapshotState(
         fetchedAt: Date?,
         now: Date = Date()
     ) -> AccountState {
         guard let fetchedAt else { return .stale }
-        return now.timeIntervalSince(fetchedAt)
-            <= Self.statusLineSnapshotLifetime
-            ? .cached
-            : .stale
+        let age = now.timeIntervalSince(fetchedAt)
+        if age <= Self.statusLineLiveWindow { return .live }
+        if age <= Self.statusLineSnapshotLifetime { return .cached }
+        return .stale
     }
 
     private func claudePlan(from account: [String: Any]?) -> String {
@@ -643,20 +926,35 @@ struct CredentialStore: Sendable {
         from raw: Any?,
         id: String,
         title: String,
+        sourceFetchedAt: Date? = nil,
         now: Date = Date()
     ) -> UsageWindow? {
         guard let object = raw as? [String: Any], let used = object["utilization"] as? Double else {
             return nil
         }
         let resetAt = (object["resets_at"] as? String).flatMap(Self.parseISO8601)
-        if let resetAt, resetAt <= now {
-            return nil
+        if let resetAt {
+            return resetAt > now
+                ? UsageWindow(id: id, title: title, usedPercent: used, resetAt: resetAt)
+                : nil
         }
-        return UsageWindow(id: id, title: title, usedPercent: used, resetAt: resetAt)
+        // Claude omits `resets_at` when no window is currently open, so the
+        // reading carries no expiry of its own. Such a window can only be
+        // trusted while the file it came from is still current; otherwise a
+        // long-finished window keeps rendering as though it were live.
+        guard Self.isCurrent(sourceFetchedAt, now: now) else { return nil }
+        return UsageWindow(id: id, title: title, usedPercent: used, resetAt: nil)
+    }
+
+    private static func isCurrent(_ fetchedAt: Date?, now: Date) -> Bool {
+        guard let fetchedAt else { return false }
+        let age = now.timeIntervalSince(fetchedAt)
+        return age >= -60 && age <= statusLineSnapshotLifetime
     }
 
     func fableUsageWindow(
         from utilization: [String: Any],
+        sourceFetchedAt: Date? = nil,
         now: Date = Date()
     ) -> UsageWindow? {
         guard let limits = utilization["limits"] as? [[String: Any]] else {
@@ -684,8 +982,10 @@ struct CredentialStore: Sendable {
 
         let resetAt = (selected["resets_at"] as? String)
             .flatMap(Self.parseISO8601)
-        if let resetAt, resetAt <= now {
-            return nil
+        if let resetAt {
+            guard resetAt > now else { return nil }
+        } else {
+            guard Self.isCurrent(sourceFetchedAt, now: now) else { return nil }
         }
         return UsageWindow(
             id: "fable-weekly",
@@ -731,5 +1031,92 @@ struct CredentialStore: Sendable {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.date(from: value)
             ?? ISO8601DateFormatter().date(from: value)
+    }
+}
+
+/// Remembers Keychain lookups for the life of the process.
+///
+/// Reading another application's Keychain item raises a system authorization
+/// panel. The dashboard re-reads its sources every few seconds, so without this
+/// a single refusal — or simply an unanswered panel — would queue a fresh prompt
+/// on every poll. A refusal is remembered far longer than a success, so saying
+/// no once is respected rather than asked again moments later.
+final class KeychainCache: @unchecked Sendable {
+    static let shared = KeychainCache()
+
+    struct Remembered {
+        let data: Data?
+    }
+
+    private static let successLifetime: TimeInterval = 5 * 60
+    private static let failureLifetime: TimeInterval = 30 * 60
+
+    private struct Entry {
+        let data: Data?
+        let expiresAt: Date
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    /// Returns a box when this service was already looked up and the result is
+    /// still current. A box holding `nil` is a remembered failure or refusal and
+    /// must not trigger another query.
+    func remembered(for service: String, now: Date = Date()) -> Remembered? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries[service], entry.expiresAt > now else {
+            return nil
+        }
+        return Remembered(data: entry.data)
+    }
+
+    func store(_ data: Data, for service: String, now: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[service] = Entry(
+            data: data,
+            expiresAt: now.addingTimeInterval(Self.successLifetime)
+        )
+    }
+
+    func storeFailure(for service: String, now: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[service] = Entry(
+            data: nil,
+            expiresAt: now.addingTimeInterval(Self.failureLifetime)
+        )
+    }
+
+    func invalidate(_ service: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeValue(forKey: service)
+    }
+}
+
+/// Spaces out session-renewal attempts.
+///
+/// The dashboard polls every few seconds. Without this, an account whose session
+/// cannot be renewed would spawn a helper process on every single poll.
+final class SessionRenewalThrottle: @unchecked Sendable {
+    static let shared = SessionRenewalThrottle()
+
+    static let interval: TimeInterval = 10 * 60
+
+    private let lock = NSLock()
+    private var lastAttempt: [String: Date] = [:]
+
+    /// Records and permits an attempt only when one is not already recent.
+    func beginAttempt(for key: String, now: Date = Date()) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let previous = lastAttempt[key],
+           now.timeIntervalSince(previous) < Self.interval {
+            return false
+        }
+        lastAttempt[key] = now
+        return true
     }
 }

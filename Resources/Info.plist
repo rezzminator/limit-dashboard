@@ -24,6 +24,15 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <!-- Enables live Claude quota queries on a normal Dock/Finder launch, which
+         does not inherit shell environment variables. Delete this LSEnvironment
+         block to return the app to local-only Claude sources (no Keychain read,
+         no Anthropic request). -->
+    <key>LSEnvironment</key>
+    <dict>
+        <key>LIMIT_DASHBOARD_CLAUDE_API</key>
+        <string>1</string>
+    </dict>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

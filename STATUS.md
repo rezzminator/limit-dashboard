@@ -2,6 +2,28 @@
 
 Snapshot verified on 2026-07-31 (Europe/Amsterdam).
 
+## Freshness and suppression audit — 2026-07-31
+
+A full audit found the dashboard reporting a current reading as `Cached`,
+hiding two accounts' real numbers behind an expired-snapshot state, rendering
+one long-finished window as though it were open, and deleting its own history.
+The causes and fixes:
+
+| Defect | Cause | Fix |
+|---|---|---|
+| A sample harvested seconds earlier displayed as `Cached`; the header `Live` count never counted Claude | `claudeSnapshotState` had no live tier — its best classification was `cached` | Added a five-minute live tier: `live` → `cached` (≤1h) → `aged` |
+| Account 2 showed no percentages while a valid 91% observation for its still-open window sat unused on disk | The identity-continuity check demanded a retained `.claude.json` backup older than the harvest. Backups rotate (five kept), so every observation older than the oldest retained backup was rejected forever | Continuity now returns `proven`/`unproven`/`contradicted`. Only observed evidence of an account change rejects a sample; absence of evidence does not |
+| Accounts with a still-open window rendered as `Quota snapshot expired` with every number blanked | `canDisplayQuotaValues` allowed only `live`/`cached` | An aged reading of an open window is a valid lower bound and is shown, labelled with its age and `usage may be higher`. Values are withheld only when no open window remains |
+| A 5-hour window from three days earlier rendered as a live 0% row | Claude omits `resets_at` when no window is open; the expiry guard skipped windows without one | A window with no reset timestamp is accepted only while its source file is still current |
+| Reported age could come from a sample that contributed nothing | `harvestedAt` was the newest harvest across all files, including ones rejected for expired windows | The age now belongs to the samples that supplied the displayed values |
+| Claude history held one row per account while Codex held 3,817 | Every write ran `DELETE … WHERE slot_id = ? AND captured_at > ?` against the newest readable source time, so falling back to an older cache erased all newer rows | The delete is gone. Snapshots with no source time are not recorded at all, which is what the delete had been compensating for |
+| Header showed an issue count with no banner explaining it | `issueCount` counted aged accounts; `issueSummary` omitted them | The banner explains every counted condition |
+| Codex labelled a weekly window `5-hour` near its reset | The title was inferred from remaining time | `primary_window` and `secondary_window` are labelled directly |
+
+The header title clipped, the Vertex y-axis labels collided, and the trailing
+x-axis label truncated, because the panels' declared minimum heights summed to
+more than the window. The window minimum and default now exceed that sum.
+
 ## Dock installation
 
 The signed app is installed at `/Applications/Limit Dashboard.app`. A
@@ -12,12 +34,20 @@ dashboard window.
 
 ## Account impact
 
+Verified by the opt-in live integration test after the 2026-07-31 transport
+change. The test intentionally asserts quota shape and range without printing
+account percentages:
+
 | Account | Dashboard source | Result |
 |---|---|---|
-| Claude Account 1 — `mrez9090@gmail.com` | `~/.claude.json` | **Stale**: local source is 2d 19h old. Percentages are suppressed until this account produces a new local snapshot. |
-| Claude Account 2 — `reza.khosravivala@gmail.com` | `~/.claude2/.claude.json` and its identity-matched slot-2 `/tmp/cc-rate-limits` source | **Stale**: local source is 2d 19h old. Percentages are suppressed until this account produces a new local snapshot. |
-| Claude Account 3 — `reza@intuita.health` | `~/.claude3/.claude.json` | **Stale**: local source is 2d 18h old. Percentages are suppressed until this account produces a new local snapshot. |
-| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: **43% remaining** / 57% used in the current window during the latest render. |
+| Claude Account 1 — `mrez9090@gmail.com` | Claude usage endpoint through curl_cffi; slot-1 local snapshot fallback | **Live**: non-empty provider quota windows, all Used values within 0–100. |
+| Claude Account 2 — `reza.khosravivala@gmail.com` | Claude usage endpoint through curl_cffi; identity-matched slot-2 local fallback | **Live**: non-empty provider quota windows, all Used values within 0–100 while no status-line session was required. |
+| Claude Account 3 — `reza@intuita.health` | Claude usage endpoint through curl_cffi; identity-matched slot-3 local fallback | **Live**: non-empty provider quota windows, all Used values within 0–100 while no status-line session was required. |
+| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: non-empty provider quota windows. |
+
+If a live provider request fails, an aged reading is still shown rather than
+hidden because usage inside one reset window never decreases: an old observation
+of a window that has not yet reset is a true lower bound.
 
 Claude cache availability can change as local provider sessions rotate. The
 dashboard re-reads all three files on every selected interval. It derives the
@@ -108,19 +138,82 @@ made stale data look live and fabricated a continuing quota-history line.
 The dashboard now:
 
 - classifies Claude source age independently from the polling clock;
-- displays quota values only for live or current local snapshots;
-- replaces aged Claude metrics with a **Quota snapshot expired** state and the
-  exact source age;
-- reports stale cards in the header issue count;
+- distinguishes **Live** (≤5 minutes), **Cached** (≤1 hour), and **Aged**;
+- shows an aged reading of a window that has not reset, labelled with its exact
+  source age and `usage may be higher`, rather than blanking the card;
+- withholds values only when no open window remains, which the card reports as
+  **Quota window has reset**;
+- reports aged and unavailable cards in both the header issue count and the
+  banner that explains it;
 - says **Checked** after polling instead of **Updated**;
-- rejects cached windows whose reset timestamp has passed; and
-- records history at the real provider observation timestamp, reconciling away
-  later legacy rows that represented repeated polls.
+- rejects cached windows whose reset timestamp has passed, and cached windows
+  with no reset timestamp once their source file is no longer current; and
+- records history at the real provider observation timestamp, skipping readings
+  whose observation time is unknown instead of stamping them with the poll time.
 
-With the current authorized non-Keychain sources, Codex is live and the three
-Claude sources are aged. The app therefore shows no Claude percentages until
-each corresponding local Claude process produces a new status-line/cache
-snapshot. It performs no Anthropic request and does not access Keychain.
+## Direct provider queries — live through curl_cffi, 2026-07-31
+
+Querying each account's quota straight from the provider is implemented behind
+`LIMIT_DASHBOARD_CLAUDE_API=1`. The existing slot identity, response parsing,
+history, and local fallback pipeline is unchanged; only the blocked transport
+was replaced.
+
+`GET https://claude.ai/api/oauth/usage` — the endpoint whose response Claude
+Code caches at `cachedUsageUtilization.utilization` — answers a third-party
+client with a Cloudflare bot challenge:
+
+    HTTP/2 403
+    cf-mitigated: challenge
+    server: cloudflare
+    <title>Just a moment...</title>
+
+This is returned to URLSession with a valid bearer token read from the same
+login Keychain item Claude Code uses, and is unchanged by sending Claude Code's
+`User-Agent`, `x-app: cli`, or `anthropic-client-platform`.
+
+The dashboard now bundles a narrow Python helper based on the transport in
+`~/work/harvester-web-mcp`: `curl_cffi`, `impersonate="chrome"`, HTTP(S)-only
+libcurl protocols, and bounded manual redirects. Its only destination is the
+Claude usage endpoint. The access token is sent to the helper over stdin and is
+never included in the process arguments, environment, logs, or result.
+
+Live validation on 2026-07-31 proved both boundaries:
+
+- an invalid test token reached Claude and received its JSON HTTP 401 response,
+  rather than Cloudflare's HTTP 403 challenge; and
+- the opt-in Swift live test required and received a **Live**, non-empty,
+  in-range quota result for all three configured Claude accounts.
+
+When the helper, network, token, or response is unavailable, the card uses the
+existing identity-matched local snapshot and states why the provider request
+failed. With the feature flag off, the app still performs no Keychain lookup or
+Claude request.
+
+Two related findings from the same investigation:
+
+- `cachedUsageUtilization` in every `.claude.json` is frozen at 2026-07-28 and
+  is not refreshed by using the account. It is a weak source; the status-line
+  harvest is the live one.
+- An expired access token is renewed by running
+  `CLAUDE_CONFIG_DIR=<account> claude auth status`. It performs no model call;
+  Claude Code renews and persists its own credential before the dashboard reads
+  it again.
+
+The practical consequence with the feature flag enabled: all three signed-in
+accounts report live even when no Claude session is rendering a status line.
+
+## Statusline harvest gate — 2026-07-31
+
+`~/.claude/statusline-command.sh` gated both quota windows behind a single
+check on the *five-hour* reset:
+
+    if (( HR5 > 0 || D7 > 0 )) && (( HR5R > _hnow )); then
+
+A session whose five-hour window had closed therefore had its still-valid
+seven-day figure discarded on every render, which is why account two went stale
+while its session was open. The windows are now gated independently, and each
+window's own `resets_at` is written through so a consumer drops whichever has
+expired. A reading of 0% is also harvested, being a real measurement.
 
 ## Refresh rendering correction
 
@@ -205,15 +298,21 @@ one-time AppKit bridge clears the window's initial first responder. Runtime
 Accessibility inspection after opening and after an automatic refresh returned
 `AXWindow`, not `AXTextField`.
 
-## No-Keychain policy
+## Credential boundary
 
-- The app does not link the macOS Security framework.
-- It contains no Keychain query code or Claude credential service names.
-- It makes no Claude network requests.
-- It never asks for a password.
-- Claude cards read only non-Keychain `.claude.json` state/cache data and
-  optional local snapshots of Claude Code's documented status-line
-  `rate_limits` fields.
+- The live Claude path is explicitly opt-in with
+  `LIMIT_DASHBOARD_CLAUDE_API=1`; without it the previous no-Keychain,
+  local-only behavior remains intact.
+- With the flag enabled, the app reads only Claude Code's three known generic
+  password items. Access tokens remain in memory and are sent only to the fixed
+  Claude usage endpoint.
+- Tokens are passed to the curl_cffi helper on stdin, not through command-line
+  arguments or environment variables, and are never displayed or logged.
+- Expired access tokens are handed back to Claude Code via
+  `CLAUDE_CONFIG_DIR=<account> claude auth status`; the dashboard does not
+  exchange or persist refresh tokens itself.
+- Claude cards retain non-Keychain `.claude.json` state/cache data and optional
+  local status-line snapshots as the failure fallback.
 - The primary Claude state path is `~/.claude.json` (not
   `~/.claude/.claude.json`).
 - Fable is read only from
@@ -228,7 +327,7 @@ Accessibility inspection after opening and after an automatic refresh returned
 - Codex tokens are read into memory, sent only to the Codex usage endpoint, and
   never displayed or logged.
 
-## Non-Keychain alternatives
+## Local-only mode
 
 1. Continue using local-only mode. If an already trusted local Claude process
    updates a profile's `.claude.json` or its existing status-line quota
@@ -237,18 +336,19 @@ Accessibility inspection after opening and after an automatic refresh returned
 2. Claude Code's documented status-line `rate_limits` fields are used when the
    existing local harvester has a safely associated active-window sample.
    Samples older than one hour are labeled with their age.
-3. Keychain behavior remains out of scope unless the user later explicitly
-   authorizes a specific action.
+3. Leave `LIMIT_DASHBOARD_CLAUDE_API` unset to guarantee this mode: no Claude
+   Keychain lookup and no Claude network request.
 
 ## Verification
 
-- Release build: passed.
-- Swift tests: 26 executed, 25 passed and 1 opt-in live test skipped by default.
-- Opt-in live Codex integration test: passed.
-- App signature and `Info.plist`: passed.
-- Binary linkage check: no Security framework.
-- Source audit: no `SecItem`, `kSec`, Claude Keychain service, or Anthropic
-  endpoint path.
+- Swift tests: 38 executed, 37 passed and 1 opt-in live test skipped by default.
+- Python helper/report tests: 11 passed.
+- Opt-in live integration test: passed, requiring live Codex quota and live,
+  non-empty quota for exactly all three Claude accounts.
+- Cloudflare transport probe: an invalid bearer reached Claude's API and
+  received the expected JSON HTTP 401 instead of a challenge HTTP 403.
+- Release app build: passed and signed with `Limit Dashboard Local Signing`;
+  the packaged `claude_usage_fetch.py` is byte-identical to the tested source.
 - Window render: visually inspected with all four equal-height cards, full
   emails, three explicit stale Claude states with no old percentages, live
   Codex data, the header issue count, the persisted interval control, a

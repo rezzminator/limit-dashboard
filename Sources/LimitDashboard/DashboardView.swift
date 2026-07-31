@@ -6,8 +6,11 @@ struct DashboardView: View {
     @ObservedObject var model: DashboardModel
     @AppStorage("refreshIntervalSeconds") private var refreshIntervalSeconds =
         RefreshPolicy.defaultSeconds
+    // The panels below declare fixed minimum heights, so the window has to be
+    // tall enough to hold their sum plus spacing and padding. When it was not,
+    // SwiftUI compressed the stack and clipped the header title.
     @ScaledMetric(relativeTo: .body) private var minimumDashboardHeight: CGFloat =
-        868
+        972
 
     private var validatedInterval: Int {
         RefreshPolicy.validated(refreshIntervalSeconds)
@@ -44,13 +47,22 @@ struct DashboardView: View {
                 .equatable()
 
                 Grid(horizontalSpacing: 10, verticalSpacing: 10) {
-                    GridRow(alignment: .top) {
-                        AccountCard(snapshot: model.snapshots[0]).equatable()
-                        AccountCard(snapshot: model.snapshots[1]).equatable()
-                    }
-                    GridRow(alignment: .top) {
-                        AccountCard(snapshot: model.snapshots[2]).equatable()
-                        AccountCard(snapshot: model.snapshots[3]).equatable()
+                    ForEach(
+                        Array(
+                            stride(from: 0, to: model.snapshots.count, by: 2)
+                        ),
+                        id: \.self
+                    ) { first in
+                        GridRow(alignment: .top) {
+                            AccountCard(snapshot: model.snapshots[first])
+                                .equatable()
+                            if model.snapshots.indices.contains(first + 1) {
+                                AccountCard(
+                                    snapshot: model.snapshots[first + 1]
+                                )
+                                .equatable()
+                            }
+                        }
                     }
                 }
 
@@ -319,10 +331,16 @@ private struct HistoryChart: View, Equatable {
         allPoints.map(\.timestamp).min()
     }
 
+    /// Ends the axis a little past the newest measurement. A tick that lands on
+    /// the trailing edge has its centred label truncated by the plot bounds, so
+    /// the domain reserves proportional room for it.
     private var historyEnd: Date {
         let latest = allPoints.map(\.timestamp).max() ?? Date()
         return latest.addingTimeInterval(
-            TimeInterval(HistoryStore.chartBucketSeconds)
+            max(
+                TimeInterval(HistoryStore.chartBucketSeconds),
+                HistoryStore.chartWindow * 0.04
+            )
         )
     }
 
@@ -411,7 +429,7 @@ private struct HistoryChart: View, Equatable {
                     }
                 }
                 .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 6)) {
+                    AxisMarks(values: .automatic(desiredCount: 5)) {
                         AxisGridLine()
                             .foregroundStyle(Color.secondary.opacity(0.08))
                         AxisValueLabel(format: .dateTime.hour().minute())
@@ -425,6 +443,9 @@ private struct HistoryChart: View, Equatable {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                         )
                 }
+                // The final tick sits on the plot's trailing edge and its label
+                // is centred on it, so it needs room to render in full.
+                .padding(.trailing, 16)
             } else {
                 Text("History begins with real local quota-state snapshots.")
                     .font(.callout.weight(.semibold))
@@ -481,9 +502,11 @@ private struct HistoryChart: View, Equatable {
 private struct VertexCard: View, Equatable {
     let report: VertexReport?
     let error: String?
-    @ScaledMetric(relativeTo: .body) private var minimumHeight: CGFloat = 205
-    @ScaledMetric(relativeTo: .body) private var idealHeight: CGFloat = 225
-    @ScaledMetric(relativeTo: .body) private var maximumHeight: CGFloat = 245
+    // The summary strip below the plot claims a fixed 86pt, so the panel needs
+    // enough height left over for the plot's own axis labels to separate.
+    @ScaledMetric(relativeTo: .body) private var minimumHeight: CGFloat = 235
+    @ScaledMetric(relativeTo: .body) private var idealHeight: CGFloat = 250
+    @ScaledMetric(relativeTo: .body) private var maximumHeight: CGFloat = 265
 
     nonisolated static func == (
         lhs: VertexCard,
@@ -584,7 +607,7 @@ private struct VertexCard: View, Equatable {
                         if hasReportedActivity {
                             AxisMarks(
                                 position: .leading,
-                                values: .automatic(desiredCount: 3)
+                                values: .automatic(desiredCount: 2)
                             ) { value in
                                 AxisGridLine()
                                     .foregroundStyle(Color.secondary.opacity(0.12))
@@ -603,7 +626,7 @@ private struct VertexCard: View, Equatable {
                         }
                     }
                     .chartXAxis {
-                        AxisMarks(values: .automatic(desiredCount: 6)) {
+                        AxisMarks(values: .automatic(desiredCount: 5)) {
                             AxisGridLine()
                                 .foregroundStyle(Color.secondary.opacity(0.08))
                             AxisValueLabel(format: .dateTime.month().day())
@@ -620,6 +643,7 @@ private struct VertexCard: View, Equatable {
                                 )
                             )
                     }
+                    .padding(.trailing, 16)
                 } else {
                     Text(error ?? "Loading actual Cloud Monitoring token buckets…")
                         .font(.callout.weight(.semibold))
@@ -945,10 +969,10 @@ private struct AccountCard: View, Equatable {
 
             if snapshot.state == .loading {
                 loadingContent
+            } else if let headlineWindow, snapshot.canDisplayQuotaValues {
+                usageContent(headlineWindow)
             } else if snapshot.state == .stale {
                 staleContent
-            } else if let headlineWindow {
-                usageContent(headlineWindow)
             } else {
                 unavailableContent
             }
@@ -991,7 +1015,7 @@ private struct AccountCard: View, Equatable {
             } else {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(accent)
+                        .fill(snapshot.showsAgedValues ? Color.orange : accent)
                         .frame(width: 5, height: 5)
                     Text(
                         snapshot.detail
@@ -1000,7 +1024,18 @@ private struct AccountCard: View, Equatable {
                                 : "Local quota snapshot")
                     )
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(
+                            snapshot.showsAgedValues ? Color.orange : .secondary
+                        )
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    if snapshot.showsAgedValues {
+                        Text("· usage may be higher")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
                 }
             }
         }
@@ -1041,7 +1076,7 @@ private struct AccountCard: View, Equatable {
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Quota snapshot expired")
+                Text("Quota window has reset")
                     .font(
                         .system(
                             .title3,
@@ -1142,12 +1177,77 @@ private struct ProviderIcon: View {
                         endPoint: .bottomTrailing
                     )
                 )
-            Image(systemName: provider == .claude ? "sparkles" : "chevron.left.forwardslash.chevron.right")
-                .font(.body.weight(.bold))
-                .foregroundStyle(.white)
+            if provider == .claude {
+                ClaudeSpark()
+                    .fill(.white)
+                    .frame(width: 21, height: 21)
+            } else {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.body.weight(.bold))
+                    .foregroundStyle(.white)
+            }
         }
         .frame(width: 36, height: 36)
         .shadow(color: accent.opacity(0.24), radius: 9, y: 4)
+    }
+}
+
+/// The Claude "spark" — a radial burst of tapered, round-tipped rays. Drawn as a
+/// vector so it stays crisp at any card size and needs no bundled raster.
+private struct ClaudeSpark: Shape {
+    var rayCount = 12
+
+    func path(in rect: CGRect) -> Path {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let outer = min(rect.width, rect.height) / 2
+        let innerRadius = outer * 0.16
+        // A ray tapers from a narrow base near the centre to a rounded tip. Half
+        // the angular half-width the base subtends; the tip is rounded by the
+        // stroke cap so the fill needs only a slim quadrilateral per ray.
+        let baseHalf = (.pi / CGFloat(rayCount)) * 0.42
+        var path = Path()
+        for index in 0..<rayCount {
+            let angle = (2 * .pi / CGFloat(rayCount)) * CGFloat(index) - .pi / 2
+            let leftBase = CGPoint(
+                x: center.x + cos(angle - baseHalf) * innerRadius,
+                y: center.y + sin(angle - baseHalf) * innerRadius
+            )
+            let rightBase = CGPoint(
+                x: center.x + cos(angle + baseHalf) * innerRadius,
+                y: center.y + sin(angle + baseHalf) * innerRadius
+            )
+            let tipHalf = baseHalf * 0.5
+            let leftTip = CGPoint(
+                x: center.x + cos(angle - tipHalf) * outer,
+                y: center.y + sin(angle - tipHalf) * outer
+            )
+            let rightTip = CGPoint(
+                x: center.x + cos(angle + tipHalf) * outer,
+                y: center.y + sin(angle + tipHalf) * outer
+            )
+            path.move(to: leftBase)
+            path.addLine(to: leftTip)
+            // Round the tip.
+            path.addQuadCurve(
+                to: rightTip,
+                control: CGPoint(
+                    x: center.x + cos(angle) * (outer * 1.08),
+                    y: center.y + sin(angle) * (outer * 1.08)
+                )
+            )
+            path.addLine(to: rightBase)
+            path.closeSubpath()
+        }
+        // A small filled hub so the rays read as one mark.
+        path.addEllipse(
+            in: CGRect(
+                x: center.x - innerRadius,
+                y: center.y - innerRadius,
+                width: innerRadius * 2,
+                height: innerRadius * 2
+            )
+        )
+        return path
     }
 }
 
@@ -1171,7 +1271,7 @@ private struct StateBadge: View {
     private var color: Color {
         switch state {
         case .live: .green
-        case .cached: .orange
+        case .cached: .teal
         case .stale: .orange
         case .quotaUnavailable: .orange
         case .loading: .blue

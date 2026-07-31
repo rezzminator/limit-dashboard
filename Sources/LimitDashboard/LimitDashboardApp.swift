@@ -9,7 +9,7 @@ struct LimitDashboardApp: App {
             DashboardView(model: model)
                 .preferredColorScheme(.dark)
         }
-        .defaultSize(width: 1060, height: 940)
+        .defaultSize(width: 1060, height: 1000)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) { }

@@ -170,13 +170,130 @@ final class LimitDashboardTests: XCTestCase {
             merged.first { $0.id == "seven-day" }?.remainingPercent,
             18
         )
-        XCTAssertNil(
+        // A later rewrite of the registry file is not evidence of anything.
+        // Claude rewrites `.claude.json` constantly for unrelated reasons, so
+        // gating on whole-file modification time discarded good observations and
+        // pinned accounts to a days-old cache.
+        let afterBenignRewrite = try XCTUnwrap(
             store.localClaudeRateLimits(
                 for: accountTwo,
                 stateModifiedAt: now.addingTimeInterval(1),
                 now: now
             ),
-            "A snapshot written before the authoritative registry state must not be associated with the new account."
+            "A registry rewrite that carries no account change must not discard a current observation."
+        )
+        XCTAssertEqual(afterBenignRewrite.sevenDay?.usedPercent, 82)
+    }
+
+    func testStatusLineAgeReportsTheSampleThatSuppliedTheValue() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-claude-age-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let liveSevenDayReset = now.addingTimeInterval(86_400)
+
+        // One file still describes the active seven-day window from an hour ago.
+        // A newer file describes only windows that have already reset, so it
+        // contributes nothing and must not make the reading look current.
+        let contributing = """
+        {
+          "acct": 2, "five_hour_used": 4, "seven_day_used": 88,
+          "five_hour_resets_at": \(now.addingTimeInterval(-10).timeIntervalSince1970),
+          "seven_day_resets_at": \(liveSevenDayReset.timeIntervalSince1970),
+          "ts": \(now.addingTimeInterval(-3_600).timeIntervalSince1970)
+        }
+        """
+        let expiredButNewer = """
+        {
+          "acct": 2, "five_hour_used": 99, "seven_day_used": 99,
+          "five_hour_resets_at": \(now.addingTimeInterval(-20).timeIntervalSince1970),
+          "seven_day_resets_at": \(now.addingTimeInterval(-15).timeIntervalSince1970),
+          "ts": \(now.addingTimeInterval(-30).timeIntervalSince1970)
+        }
+        """
+        try Data(contributing.utf8).write(
+            to: directory.appendingPathComponent("acct-2.contributing.json")
+        )
+        try Data(expiredButNewer.utf8).write(
+            to: directory.appendingPathComponent("acct-2.expired.json")
+        )
+
+        let store = CredentialStore(claudeRateLimitsDirectory: directory)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.configured.first { $0.position == 1 }
+        )
+        let limits = try XCTUnwrap(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                stateModifiedAt: now.addingTimeInterval(-7_200),
+                maximumAge: nil,
+                now: now
+            )
+        )
+        XCTAssertNil(limits.fiveHour, "Both five-hour windows have reset.")
+        XCTAssertEqual(limits.sevenDay?.usedPercent, 88)
+        XCTAssertEqual(
+            limits.harvestedAt,
+            now.addingTimeInterval(-3_600),
+            "The age must belong to the sample that supplied the value, not to a newer sample that contributed nothing."
+        )
+        XCTAssertEqual(
+            store.claudeSnapshotState(fetchedAt: limits.harvestedAt, now: now),
+            .cached,
+            "An hour-old reading is not live."
+        )
+    }
+
+    func testCurrentStatusLineHarvestIsReportedAsLiveRatherThanCached() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let store = CredentialStore()
+        XCTAssertEqual(
+            store.claudeSnapshotState(
+                fetchedAt: now.addingTimeInterval(-5),
+                now: now
+            ),
+            .live,
+            "A snapshot harvested seconds ago is the provider's current state."
+        )
+        XCTAssertEqual(
+            store.claudeSnapshotState(
+                fetchedAt: now.addingTimeInterval(-30 * 60),
+                now: now
+            ),
+            .cached
+        )
+    }
+
+    func testWindowWithoutResetTimeIsDroppedOnceItsSourceIsNoLongerCurrent() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let store = CredentialStore()
+        let raw: [String: Any] = ["utilization": 0.0, "resets_at": NSNull()]
+
+        XCTAssertNil(
+            store.usageWindow(
+                from: raw,
+                id: "five-hour",
+                title: "5-hour",
+                sourceFetchedAt: now.addingTimeInterval(-3 * 24 * 60 * 60),
+                now: now
+            ),
+            "A window with no reset time carries no expiry, so a days-old reading of it must not render as a live window."
+        )
+        XCTAssertNotNil(
+            store.usageWindow(
+                from: raw,
+                id: "five-hour",
+                title: "5-hour",
+                sourceFetchedAt: now.addingTimeInterval(-60),
+                now: now
+            )
         )
     }
 
@@ -524,7 +641,7 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertNotEqual(first, nextPoll)
     }
 
-    func testStaleSnapshotCannotDisplayQuotaValues() throws {
+    func testAgedSnapshotStillShowsAnActiveWindowButIsMarkedAged() throws {
         let slot = try XCTUnwrap(AccountSlot.configured.first)
         let window = UsageWindow(
             id: "seven-day",
@@ -532,7 +649,7 @@ final class LimitDashboardTests: XCTestCase {
             usedPercent: 91,
             resetAt: Date(timeIntervalSince1970: 2_000_100_000)
         )
-        let stale = AccountSnapshot(
+        let aged = AccountSnapshot(
             id: slot.id,
             slot: slot,
             identity: "account",
@@ -545,11 +662,78 @@ final class LimitDashboardTests: XCTestCase {
             refreshedAt: Date(timeIntervalSince1970: 2_000_000_000),
             duplicatePeer: nil
         )
-        XCTAssertFalse(stale.canDisplayQuotaValues)
+        // The window has not reset, and usage inside one window never falls, so
+        // 91% remains a true lower bound. Blanking the card hid the single most
+        // important number on it.
+        XCTAssertTrue(aged.canDisplayQuotaValues)
+        XCTAssertTrue(aged.showsAgedValues)
 
-        var current = stale
+        var current = aged
         current.state = .cached
         XCTAssertTrue(current.canDisplayQuotaValues)
+        XCTAssertFalse(current.showsAgedValues)
+
+        var withoutActiveWindow = aged
+        withoutActiveWindow.windows = []
+        XCTAssertFalse(
+            withoutActiveWindow.canDisplayQuotaValues,
+            "With every window reset there is nothing true left to show."
+        )
+    }
+
+    func testHistoryKeepsEarlierMeasurementsWhenTheNewestReadableSourceIsOlder() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-history-regression-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = HistoryStore(
+            databaseURL: directory.appendingPathComponent("history.sqlite3")
+        )
+        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let old = Date(timeIntervalSince1970: 1_900_000_000)
+        let recent = old.addingTimeInterval(6 * 60 * 60)
+
+        func snapshot(usedPercent: Double, refreshedAt: Date) -> AccountSnapshot {
+            AccountSnapshot(
+                id: slot.id,
+                slot: slot,
+                identity: "account",
+                plan: "Plan",
+                state: .cached,
+                windows: [
+                    UsageWindow(
+                        id: "five-hour",
+                        title: "5-hour",
+                        usedPercent: usedPercent,
+                        resetAt: nil
+                    )
+                ],
+                fableUsage: nil,
+                providerAccountID: nil,
+                detail: nil,
+                refreshedAt: refreshedAt,
+                duplicatePeer: nil
+            )
+        }
+
+        // A live session records a recent reading, the session ends, and the only
+        // source left is the account's older on-disk cache.
+        try store.record([snapshot(usedPercent: 55, refreshedAt: recent)], at: recent)
+        try store.record(
+            [snapshot(usedPercent: 20, refreshedAt: old)],
+            at: recent.addingTimeInterval(60)
+        )
+
+        let points = try store.loadPrimaryUsedPoints(
+            since: old.addingTimeInterval(-1)
+        )
+        XCTAssertEqual(
+            points.count,
+            2,
+            "Falling back to an older source must not delete newer measurements that really happened."
+        )
+        XCTAssertEqual(points.map(\.value).sorted(), [20, 55])
     }
 
     func testHistoryStoreAggregatesPrimaryUsedValuesWithoutIdentityData() throws {
@@ -864,6 +1048,44 @@ final class LimitDashboardTests: XCTestCase {
         )
     }
 
+    func testClaudeImpersonatedTransportDecodesHelperEnvelope() throws {
+        let body = #"{"five_hour":{"utilization":12}}"#
+        let encoded = Data(body.utf8).base64EncodedString()
+        let envelope = """
+        {
+          "schema_version": 1,
+          "status": 200,
+          "body_base64": "\(encoded)",
+          "error": null
+        }
+        """
+
+        let response = try ClaudeUsageTransport().decode(Data(envelope.utf8))
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(response.data, Data(body.utf8))
+    }
+
+    func testClaudeImpersonatedTransportRejectsFailedHelperEnvelope() {
+        let envelope = """
+        {
+          "schema_version": 1,
+          "status": null,
+          "body_base64": "",
+          "error": "transport_failed"
+        }
+        """
+
+        XCTAssertThrowsError(
+            try ClaudeUsageTransport().decode(Data(envelope.utf8))
+        ) { error in
+            XCTAssertEqual(
+                error as? ClaudeUsageTransport.TransportError,
+                .malformedOutput
+            )
+        }
+    }
+
     func testZeroVertexBucketsAreValidMeasurementsWithoutActivity() throws {
         let payload = """
         {
@@ -922,7 +1144,7 @@ final class LimitDashboardTests: XCTestCase {
 
     func testLiveProviderRequestsUseTheAppImplementation() async throws {
         guard ProcessInfo.processInfo.environment["LIMIT_DASHBOARD_LIVE_TESTS"] == "1" else {
-            throw XCTSkip("Live Codex network validation is opt-in.")
+            throw XCTSkip("Live provider network validation is opt-in.")
         }
 
         let store = CredentialStore()
@@ -930,17 +1152,184 @@ final class LimitDashboardTests: XCTestCase {
         let api = ProviderAPI()
 
         var codexWasLive = false
+        var liveClaudeAccounts = 0
         for item in loaded {
             switch item {
             case .codex(let slot, let credential):
                 let snapshot = try await api.fetchCodex(slot: slot, credential: credential)
                 codexWasLive = snapshot.state == .live
                 XCTAssertFalse(snapshot.windows.isEmpty)
+            case .claude(let slot, let credential):
+                let snapshot = try await api.fetchClaude(
+                    slot: slot,
+                    credential: credential,
+                    store: store
+                )
+                XCTAssertEqual(snapshot.state, .live)
+                XCTAssertFalse(snapshot.windows.isEmpty)
+                XCTAssertFalse(
+                    snapshot.windows.contains { $0.usedPercent < 0 || $0.usedPercent > 100 },
+                    "The provider reported a percentage outside 0...100."
+                )
+                liveClaudeAccounts += 1
             case .failed:
                 continue
             }
         }
 
         XCTAssertTrue(codexWasLive, "Codex usage endpoint did not return a live window.")
+        XCTAssertEqual(
+            liveClaudeAccounts,
+            3,
+            "Every configured Claude account must produce a live provider reading."
+        )
+    }
+
+    func testClaudeKeychainServiceMatchesClaudeCodesNamingScheme() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // The default config directory keeps the bare service name; any other
+        // one is suffixed with the first eight hex digits of SHA-256(path).
+        XCTAssertEqual(
+            CredentialStore.claudeKeychainService(
+                forConfigDirectory: "\(home)/.claude"
+            ),
+            "Claude Code-credentials"
+        )
+        XCTAssertEqual(
+            CredentialStore.claudeKeychainService(
+                forConfigDirectory: "/Users/reza/.claude2"
+            ),
+            "Claude Code-credentials-dceab1ac"
+        )
+        XCTAssertEqual(
+            CredentialStore.claudeKeychainService(
+                forConfigDirectory: "/Users/reza/.claude3"
+            ),
+            "Claude Code-credentials-f90b25d2"
+        )
+    }
+
+    func testSlotOneUsesTheClaudeDirectoryEvenThoughItsRegistryIsAtHome() throws {
+        let store = CredentialStore()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let slots = AccountSlot.configured.filter { $0.provider == .claude }
+        XCTAssertEqual(
+            slots.map { store.claudeConfigDirectory(for: $0) },
+            ["\(home)/.claude", "\(home)/.claude2", "\(home)/.claude3"],
+            "Slot one reads ~/.claude.json but its credential lives under ~/.claude."
+        )
+        XCTAssertNil(
+            store.claudeConfigDirectory(
+                for: try XCTUnwrap(
+                    AccountSlot.configured.first { $0.provider == .codex }
+                )
+            )
+        )
+    }
+
+    func testExpiredClaudeTokenIsNotUsedForALiveRequest() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let identity = LocalIdentity(
+            email: "person@example.com",
+            displayName: nil,
+            organizationName: nil
+        )
+        func credential(expiresAt: Date?) -> ClaudeCredential {
+            ClaudeCredential(
+                accessToken: "token",
+                expiresAt: expiresAt,
+                identity: identity,
+                plan: "Max",
+                providerAccountID: nil
+            )
+        }
+        XCTAssertTrue(
+            credential(expiresAt: now.addingTimeInterval(60)).isUsable(now: now)
+        )
+        XCTAssertFalse(
+            credential(expiresAt: now.addingTimeInterval(-1)).isUsable(now: now),
+            "Refreshing the token is Claude Code's job; an expired one falls back to the local snapshot."
+        )
+        XCTAssertFalse(
+            ClaudeCredential(
+                accessToken: "",
+                expiresAt: nil,
+                identity: identity,
+                plan: "Max",
+                providerAccountID: nil
+            ).isUsable(now: now)
+        )
+    }
+
+    func testSessionRenewalIsThrottledSoPollingCannotSpawnHelperProcesses() {
+        let throttle = SessionRenewalThrottle()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = "/Users/reza/.claude3"
+
+        XCTAssertTrue(throttle.beginAttempt(for: account, now: now))
+        XCTAssertFalse(
+            throttle.beginAttempt(for: account, now: now.addingTimeInterval(1)),
+            "The dashboard polls every few seconds; a second attempt straight away would spawn a helper per poll."
+        )
+        XCTAssertFalse(
+            throttle.beginAttempt(for: account, now: now.addingTimeInterval(9 * 60))
+        )
+        XCTAssertTrue(
+            throttle.beginAttempt(for: account, now: now.addingTimeInterval(11 * 60)),
+            "After the interval a renewal may be attempted again."
+        )
+        XCTAssertTrue(
+            throttle.beginAttempt(
+                for: "/Users/reza/.claude2",
+                now: now.addingTimeInterval(1)
+            ),
+            "Throttling is per account, not global."
+        )
+    }
+
+    func testKeychainCacheInvalidationLetsARenewedTokenBeSeenImmediately() {
+        let cache = KeychainCache()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let service = "Claude Code-credentials-test"
+
+        cache.storeFailure(for: service, now: now)
+        XCTAssertNotNil(cache.remembered(for: service, now: now))
+
+        cache.invalidate(service)
+        XCTAssertNil(
+            cache.remembered(for: service, now: now),
+            "After Claude Code renews the session the stale result must not be reused."
+        )
+    }
+
+    func testKeychainRefusalIsRememberedSoThePanelIsNotRaisedRepeatedly() {
+        let cache = KeychainCache()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let service = "Claude Code-credentials-test"
+
+        XCTAssertNil(cache.remembered(for: service, now: now))
+
+        cache.storeFailure(for: service, now: now)
+        let remembered = cache.remembered(for: service, now: now.addingTimeInterval(60))
+        XCTAssertNotNil(
+            remembered,
+            "A refusal must be remembered, otherwise every poll raises a new panel."
+        )
+        XCTAssertNil(remembered?.data)
+
+        XCTAssertNil(
+            cache.remembered(for: service, now: now.addingTimeInterval(31 * 60)),
+            "The refusal eventually expires so access can be granted later."
+        )
+
+        cache.store(Data("secret".utf8), for: service, now: now)
+        XCTAssertEqual(
+            cache.remembered(for: service, now: now.addingTimeInterval(60))?.data,
+            Data("secret".utf8)
+        )
+        XCTAssertNil(
+            cache.remembered(for: service, now: now.addingTimeInterval(6 * 60)),
+            "A success is re-read often enough to pick up a rotated token."
+        )
     }
 }

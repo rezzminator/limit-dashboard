@@ -89,10 +89,15 @@ latest real source observation, it removes those invalid rows.
 ```
 
 Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
+For live Claude quota, the `curl_cffi` runtime from
+`~/work/harvester-web-mcp/.venv/bin/python` must also exist. Set
+`LIMIT_DASHBOARD_CURL_CFFI_PYTHON` to another Python executable when
+`curl_cffi` is installed elsewhere.
 
 ## Credential and network behavior
 
-- The app does not access macOS Keychain and never triggers a Keychain prompt.
+- By default the app does not access the macOS Keychain and never triggers a
+  Keychain prompt. Only `LIMIT_DASHBOARD_CLAUDE_API=1` changes that; see below.
 - Claude identities and fallback usage snapshots come from each local account
   state file: `~/.claude.json`, `~/.claude2/.claude.json`, and
   `~/.claude3/.claude.json`.
@@ -100,15 +105,20 @@ Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
   snapshot under `/tmp/cc-rate-limits`, the app prefers its officially
   supported `rate_limits.five_hour` and `rate_limits.seven_day` values. A file
   is accepted only for the matching config slot and while its reset window is
-  still active. Samples up to one hour old are current local snapshots. If no
-  current sample exists, a newer identity-matched active-window observation may
-  replace an older cache internally, but quota values are hidden once their
-  selected source is more than one hour old. The card changes to **Stale**,
-  reports the source age, and waits for a new local snapshot. Within the same
-  reset window, an older/lower observation can never reduce the selected Used
-  percentage. If the state file was rewritten after harvest, the app requires
-  the local registry backups to prove that the same account identity remained
-  assigned to that slot throughout.
+  still active. A sample harvested within five minutes is **Live**; one up to
+  an hour old is **Cached**. Older readings of a window that has not yet reset
+  are shown as **Aged**, labelled with their exact source age and a note that
+  usage may be higher — usage inside one reset window never decreases, so an
+  old observation is a true lower bound rather than a wrong number. Values are
+  withheld only when every window has reset, which the card reports as **Quota
+  window has reset**. Within the same reset window, an older/lower observation
+  can never reduce the selected Used percentage.
+- A later rewrite of `.claude.json` is not treated as an account change on its
+  own, because Claude rewrites that file constantly for unrelated reasons. The
+  app rejects a sample only when the retained registry backups actually show a
+  different account across the harvest instant. Those backups rotate, so an
+  observation older than the oldest retained backup cannot be proven either
+  way; it stays usable, and its age is stated on the card.
 - Full account email addresses come from each file's
   `oauthAccount.emailAddress`, with the configured label used only if that
   field is absent. Tokens and other credential fields are never shown.
@@ -117,28 +127,47 @@ Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
   contains another account's cache, its card reports **Quota unavailable** and
   renders none of those borrowed values.
 - Codex credentials are read from `~/.codex/auth.json`.
+- With `LIMIT_DASHBOARD_CLAUDE_API=1`, every Claude card reads its account's
+  Claude Code credential from the login Keychain and queries
+  `https://claude.ai/api/oauth/usage`. The bundled helper reuses
+  harvester-web-mcp's `curl_cffi` Chrome transport because a normal URLSession
+  request receives Cloudflare's `cf-mitigated: challenge` response. The token
+  crosses the local process boundary only on stdin and is never placed in
+  arguments, environment variables, logs, or output.
+- The helper has a fixed `https://claude.ai` destination, follows redirects
+  manually only within that origin, limits the response size, and returns the
+  provider body to the existing parser. A failed transport, rejected session,
+  or changed response falls back to the identity-matched local status-line/cache
+  snapshot rather than blanking the card.
+- Without `LIMIT_DASHBOARD_CLAUDE_API=1`, Claude remains local-only: no Keychain
+  read and no Anthropic request.
 - Access tokens are kept in memory only. The app has no token logging,
   analytics, crash uploader, cookies, or persistent response cache.
-- The app makes no Claude network requests in cached-only mode.
-- Codex requests go only to:
-  - `https://chatgpt.com/backend-api/wham/usage`
-- The app never asks for passwords and never refreshes, rotates, overwrites, or
-  exports provider credentials.
+- Requests go only to:
+  - `https://chatgpt.com/backend-api/wham/usage` (Codex)
+  - `https://claude.ai/api/oauth/usage` (Claude) — **only** when
+    `LIMIT_DASHBOARD_CLAUDE_API=1`.
+- The app never asks for passwords, directly refreshes tokens, rotates refresh
+  tokens, overwrites credentials, or exports credentials. When an access token
+  has expired it runs `CLAUDE_CONFIG_DIR=<account> claude auth status`, which
+  performs no model call and lets Claude Code renew and persist its own session.
 
-Claude cards refresh their non-Keychain local view at the selected interval. If
-another trusted local Claude Code process updates its status-line snapshot or a
-profile cache, the dashboard picks up the new value automatically. Claude Code
+Claude cards query the provider at the selected interval when the feature flag
+is enabled. They also refresh their non-Keychain fallback view, so an update to
+a status-line snapshot or profile cache is picked up automatically. Claude Code
 documents `rate_limits.*.used_percentage` as the consumed percentage from 0 to
 100 and `resets_at` as Unix epoch seconds:
 <https://code.claude.com/docs/en/statusline#rate-limit-usage>.
 
 The refresh interval is a local **check** interval, not a promise that a
 provider created new data. The footer therefore says **Checked**, source age is
-evaluated independently of polling time, and expired/stale Claude percentages
-are never presented as current.
+evaluated independently of polling time, and an aged Claude percentage is never
+presented as current — it is shown with its age instead. A window whose reset
+has passed is dropped rather than displayed, as is a cached window that carries
+no reset timestamp once its source file is no longer current.
 
 Each Claude card also shows **Fable usage**, the model-specific weekly limit,
-when its state-file cache contains this exact entry:
+when the live response or fallback state-file cache contains this exact entry:
 
 ```text
 cachedUsageUtilization.utilization.limits[]

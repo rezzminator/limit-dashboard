@@ -60,7 +60,10 @@ struct HistoryStore: Sendable {
 
     func record(_ snapshots: [AccountSnapshot], at capturedAt: Date) throws {
         let measurements = snapshots.flatMap { snapshot -> [Measurement] in
-            let sourceCapturedAt = snapshot.refreshedAt ?? capturedAt
+            // Without the provider's own observation time there is no honest
+            // place for the reading on a time axis. Substituting the poll time
+            // would invent a measurement that says the source was read now.
+            guard let sourceCapturedAt = snapshot.refreshedAt else { return [] }
             var values = snapshot.windows.enumerated().map { index, window in
                 Measurement(
                     slotID: snapshot.slot.id,
@@ -88,44 +91,13 @@ struct HistoryStore: Sendable {
         try withDatabase { database in
             try execute(database, "BEGIN IMMEDIATE")
             do {
-                let reconcile = """
-                    DELETE FROM quota_snapshots
-                    WHERE slot_id = ? AND captured_at > ?
-                    """
-                var reconcileStatement: OpaquePointer?
-                guard sqlite3_prepare_v2(
-                    database,
-                    reconcile,
-                    -1,
-                    &reconcileStatement,
-                    nil
-                ) == SQLITE_OK, let reconcileStatement else {
-                    throw sqliteError(database)
-                }
-                defer { sqlite3_finalize(reconcileStatement) }
-
-                for snapshot in snapshots {
-                    guard let sourceCapturedAt = snapshot.refreshedAt else {
-                        continue
-                    }
-                    sqlite3_reset(reconcileStatement)
-                    sqlite3_clear_bindings(reconcileStatement)
-                    try bind(
-                        snapshot.slot.id,
-                        to: 1,
-                        statement: reconcileStatement,
-                        database: database
-                    )
-                    sqlite3_bind_double(
-                        reconcileStatement,
-                        2,
-                        sourceCapturedAt.timeIntervalSince1970
-                    )
-                    guard sqlite3_step(reconcileStatement) == SQLITE_DONE else {
-                        throw sqliteError(database)
-                    }
-                }
-
+                // Rows are keyed by the provider's own observation time, so a
+                // repeated poll of an unchanged source rewrites its own row
+                // instead of drawing a flat line forward. Nothing else is
+                // deleted here: a slot whose newest readable source is older
+                // than rows already on file — the normal case once a session
+                // ends and only an older cache remains — must not take genuine
+                // newer history down with it.
                 let insert = """
                     INSERT INTO quota_snapshots (
                         slot_id,

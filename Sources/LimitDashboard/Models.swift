@@ -18,7 +18,7 @@ enum AccountState: String, Hashable, Sendable {
         case .loading: "Refreshing"
         case .live: "Live"
         case .cached: "Cached"
-        case .stale: "Stale"
+        case .stale: "Aged"
         case .quotaUnavailable: "Quota unavailable"
         case .unavailable: "Unavailable"
         }
@@ -154,8 +154,25 @@ struct AccountSnapshot: Identifiable, Equatable, Sendable {
     var refreshedAt: Date?
     var duplicatePeer: String?
 
+    // Every window that survives into a snapshot has already been checked
+    // against its own `resets_at`, so a window that is present is a window whose
+    // provider reset has not happened yet. An observation of an active window
+    // stays meaningful as it ages — usage inside one window never moves
+    // backward, so an old reading is a valid lower bound, not a wrong number.
+    // Values are therefore withheld only when there is no active window left.
     var canDisplayQuotaValues: Bool {
-        state == .live || state == .cached
+        switch state {
+        case .live, .cached, .stale:
+            !windows.isEmpty
+        case .loading, .quotaUnavailable, .unavailable:
+            false
+        }
+    }
+
+    /// True when the newest values are old enough that usage may have grown
+    /// since. The card shows the numbers as a lower bound and states the age.
+    var showsAgedValues: Bool {
+        state == .stale && !windows.isEmpty
     }
 
     static func loading(_ slot: AccountSlot) -> AccountSnapshot {
@@ -249,13 +266,32 @@ struct CodexCredential: Sendable {
     let identity: LocalIdentity
 }
 
+/// A Claude OAuth session read from the login Keychain. The token is held in
+/// memory for the duration of one request and is never logged or persisted.
+struct ClaudeCredential: Sendable {
+    let accessToken: String
+    let expiresAt: Date?
+    let identity: LocalIdentity
+    let plan: String
+    let providerAccountID: String?
+
+    func isUsable(now: Date = Date()) -> Bool {
+        guard !accessToken.isEmpty else { return false }
+        // Refreshing is Claude Code's job. An expired token is left alone and
+        // the dashboard falls back to the local snapshot instead.
+        guard let expiresAt else { return true }
+        return expiresAt > now
+    }
+}
+
 enum LoadedCredential: Sendable {
     case codex(AccountSlot, CodexCredential)
+    case claude(AccountSlot, ClaudeCredential)
     case failed(AccountSlot, LocalIdentity?, String)
 
     var slot: AccountSlot {
         switch self {
-        case .codex(let slot, _), .failed(let slot, _, _):
+        case .codex(let slot, _), .claude(let slot, _), .failed(let slot, _, _):
             slot
         }
     }

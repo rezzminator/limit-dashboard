@@ -12,6 +12,7 @@ mkdir -p "$APP_PATH/Contents/Resources"
 cp "$PROJECT_DIR/.build/release/LimitDashboard" "$APP_PATH/Contents/MacOS/LimitDashboard"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_PATH/Contents/Info.plist"
 cp "$PROJECT_DIR/scripts/vertex_ai_report.py" "$APP_PATH/Contents/Resources/vertex_ai_report.py"
+cp "$PROJECT_DIR/scripts/claude_usage_fetch.py" "$APP_PATH/Contents/Resources/claude_usage_fetch.py"
 
 for size in 16 32 128 256 512; do
     mkdir -p "$ICON_WORK/AppIcon.iconset"
@@ -23,6 +24,25 @@ for size in 16 32 128 256 512; do
 done
 
 iconutil -c icns "$ICON_WORK/AppIcon.iconset" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
-codesign --force --deep --sign - "$APP_PATH"
+
+# Sign with the local self-signed identity when it is available.
+#
+# The app reads each Claude account's token from the login Keychain, and a
+# Keychain authorization applies to a specific code identity. An ad-hoc
+# signature ("-") is identified by the hash of the binary, so every rebuild
+# produced a new identity and macOS asked for approval again. This certificate
+# gives a designated requirement of the form
+#   identifier "local.reza.limitdashboard" and certificate root = H"..."
+# which is unchanged by rebuilding, so "Always Allow" is granted once and holds.
+SIGNING_IDENTITY="Limit Dashboard Local Signing"
+if security find-certificate -c "$SIGNING_IDENTITY" >/dev/null 2>&1; then
+    codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_PATH"
+    echo "Signed with: $SIGNING_IDENTITY"
+else
+    # Falls back to ad-hoc so the build still succeeds on a machine without the
+    # certificate; Keychain approval will then be asked for on each rebuild.
+    codesign --force --deep --sign - "$APP_PATH"
+    echo "Signed ad-hoc ('$SIGNING_IDENTITY' not found; Keychain will re-prompt)"
+fi
 
 echo "Built: $APP_PATH"

@@ -35,6 +35,7 @@ struct ProviderAPI {
         case invalidResponse
         case http(Int, String)
         case decoding
+        case transport(String)
 
         var errorDescription: String? {
             switch self {
@@ -44,11 +45,14 @@ struct ProviderAPI {
                 message.isEmpty ? "Provider request failed (HTTP \(code))." : message
             case .decoding:
                 "The provider changed its usage response format."
+            case .transport(let message):
+                message
             }
         }
     }
 
     private let session: URLSession
+    private let claudeTransport: ClaudeUsageTransport
 
     init() {
         let configuration = URLSessionConfiguration.ephemeral
@@ -58,6 +62,7 @@ struct ProviderAPI {
         configuration.timeoutIntervalForResource = 25
         configuration.httpShouldSetCookies = false
         session = URLSession(configuration: configuration)
+        claudeTransport = ClaudeUsageTransport()
     }
 
     func fetchCodex(slot: AccountSlot, credential: CodexCredential) async throws -> AccountSnapshot {
@@ -80,7 +85,7 @@ struct ProviderAPI {
             windows.append(
                 UsageWindow(
                     id: "primary",
-                    title: windowTitle(primary),
+                    title: "5-hour",
                     usedPercent: primary.usedPercent,
                     resetAt: primary.resetAt.map(Date.init(timeIntervalSince1970:))
                 )
@@ -90,7 +95,7 @@ struct ProviderAPI {
             windows.append(
                 UsageWindow(
                     id: "secondary",
-                    title: windowTitle(secondary),
+                    title: "Weekly",
                     usedPercent: secondary.usedPercent,
                     resetAt: secondary.resetAt.map(Date.init(timeIntervalSince1970:))
                 )
@@ -109,6 +114,106 @@ struct ProviderAPI {
             providerAccountID: credential.accountID,
             detail: nil,
             refreshedAt: Date(),
+            duplicatePeer: nil
+        )
+    }
+
+    /// Reads the account's own quota straight from the provider, which is the
+    /// only way an account that is not currently running can report anything.
+    /// The endpoint returns the same payload Claude Code caches under
+    /// `cachedUsageUtilization.utilization`, so the local parsing is reused.
+    func fetchClaude(
+        slot: AccountSlot,
+        credential: ClaudeCredential,
+        store: CredentialStore = CredentialStore()
+    ) async throws -> AccountSnapshot {
+        // `/api/oauth/*` is served by the claude.ai origin, not by the model API
+        // host. The helper fixes that destination internally so the bearer cannot
+        // be sent anywhere else.
+        let transportResponse: ClaudeUsageTransport.Response
+        do {
+            transportResponse = try claudeTransport.fetch(
+                accessToken: credential.accessToken
+            )
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? "The Claude quota transport is unavailable."
+            throw RequestError.transport(message)
+        }
+        let data = transportResponse.data
+        guard (200..<300).contains(transportResponse.statusCode) else {
+            throw RequestError.http(
+                transportResponse.statusCode,
+                safeProviderMessage(data, code: transportResponse.statusCode)
+            )
+        }
+
+        guard
+            let root = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any]
+        else {
+            throw RequestError.decoding
+        }
+        // Accept the payload either bare or wrapped, so a future envelope change
+        // degrades to the local snapshot rather than showing wrong numbers.
+        let utilization: [String: Any]
+        if root["five_hour"] != nil || root["seven_day"] != nil || root["limits"] != nil {
+            utilization = root
+        } else if let nested = root["utilization"] as? [String: Any] {
+            utilization = nested
+        } else {
+            throw RequestError.decoding
+        }
+
+        let now = Date()
+        var windows: [UsageWindow] = []
+        if let fiveHour = store.usageWindow(
+            from: utilization["five_hour"],
+            id: "five-hour",
+            title: "5-hour",
+            sourceFetchedAt: now,
+            now: now
+        ) {
+            windows.append(fiveHour)
+        }
+        if let sevenDay = store.usageWindow(
+            from: utilization["seven_day"],
+            id: "seven-day",
+            title: "7-day",
+            sourceFetchedAt: now,
+            now: now
+        ) {
+            windows.append(sevenDay)
+        }
+
+        let identity = credential.identity.preferredDisplay
+            ?? slot.configuredEmail
+            ?? slot.localLabel
+        guard !windows.isEmpty else {
+            return AccountSnapshot.quotaUnavailable(
+                slot,
+                identity: identity,
+                plan: credential.plan,
+                detail: "The provider reports no open quota window for this account.",
+                refreshedAt: now
+            )
+        }
+
+        return AccountSnapshot(
+            id: slot.id,
+            slot: slot,
+            identity: identity,
+            plan: credential.plan,
+            state: .live,
+            windows: windows,
+            fableUsage: store.fableUsageWindow(
+                from: utilization,
+                sourceFetchedAt: now,
+                now: now
+            ),
+            providerAccountID: credential.providerAccountID,
+            detail: "Provider confirmed",
+            refreshedAt: now,
             duplicatePeer: nil
         )
     }
@@ -164,11 +269,4 @@ struct ProviderAPI {
             .joined(separator: " ")
     }
 
-    private func windowTitle(_ window: CodexUsageResponse.Window) -> String {
-        guard let resetAt = window.resetAt else { return "Usage" }
-        let seconds = max(0, resetAt - Date().timeIntervalSince1970)
-        if seconds >= 6 * 24 * 60 * 60 { return "Weekly" }
-        if seconds >= 4 * 60 * 60 { return "5-hour" }
-        return "Usage"
-    }
 }

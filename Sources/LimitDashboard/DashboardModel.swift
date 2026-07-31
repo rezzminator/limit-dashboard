@@ -19,7 +19,7 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var vertexError: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdated: Date?
-    private var refreshInFlight = false
+    private var refreshInFlight: Task<Void, Never>?
     private let historyStore = HistoryStore()
     private var lastVertexAttempt: Date?
 
@@ -35,15 +35,13 @@ final class DashboardModel: ObservableObject {
         return unavailable + unavailableQuota + stale + (hasDuplicateGroup ? 1 : 0)
     }
 
+    // The banner explains every condition the header counts, so a non-zero
+    // issue count is never left without a reason on screen.
     var issueSummary: String? {
         let unavailable = snapshots.filter { $0.state == .unavailable }.count
         let unavailableQuota = snapshots.filter { $0.state == .quotaUnavailable }.count
+        let aged = snapshots.filter { $0.state == .stale }.count
         let duplicates = snapshots.filter { $0.duplicatePeer != nil }.count
-        if unavailable == 0,
-           unavailableQuota == 0,
-           duplicates == 0 {
-            return nil
-        }
 
         var parts: [String] = []
         if unavailable > 0 {
@@ -54,25 +52,46 @@ final class DashboardModel: ObservableObject {
                 "\(unavailableQuota) account\(unavailableQuota == 1 ? "" : "s") waiting for its own quota snapshot"
             )
         }
+        if aged > 0 {
+            parts.append(
+                "\(aged) account\(aged == 1 ? "" : "s") showing an aged reading"
+            )
+        }
         if duplicates > 0 {
             parts.append("duplicate Claude session detected")
         }
-        return parts.joined(separator: " · ")
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    /// A manual refresh that lands during a scheduled poll waits for that poll's
+    /// result instead of being silently dropped, so the button always resolves
+    /// to current data.
     func refresh(showActivity: Bool = false) async {
-        guard !refreshInFlight else { return }
-        refreshInFlight = true
+        if let refreshInFlight {
+            if showActivity {
+                isRefreshing = true
+                await refreshInFlight.value
+                isRefreshing = false
+            } else {
+                await refreshInFlight.value
+            }
+            return
+        }
+        let work = Task { await performRefresh() }
+        refreshInFlight = work
         if showActivity {
             isRefreshing = true
         }
         defer {
-            refreshInFlight = false
+            refreshInFlight = nil
             if showActivity {
                 isRefreshing = false
             }
         }
+        await work.value
+    }
 
+    private func performRefresh() async {
         let store = CredentialStore()
         let loaded = await Task.detached(priority: .userInitiated) {
             AccountSlot.configured.map(store.load)
@@ -197,13 +216,48 @@ final class DashboardModel: ObservableObject {
             switch loaded {
             case .codex(let slot, let credential):
                 return try await api.fetchCodex(slot: slot, credential: credential)
+            case .claude(let slot, let credential):
+                do {
+                    let snapshot = try await api.fetchClaude(
+                        slot: slot,
+                        credential: credential,
+                        store: store
+                    )
+                    debugLog("\(slot.id): API OK state=\(snapshot.state.title)")
+                    return snapshot
+                } catch {
+                    debugLog("\(slot.id): API FAILED \(compact(error))")
+                    // A rejected token or an unreachable provider must not blank
+                    // the card: the local snapshot is still the best known state.
+                    return store.cachedClaudeSnapshot(
+                        for: slot,
+                        identity: credential.identity,
+                        note: "provider request failed (\(compact(error)))"
+                    ) ?? AccountSnapshot.unavailable(
+                        slot,
+                        identity: credential.identity.preferredDisplay,
+                        plan: credential.plan,
+                        detail: friendly(error)
+                    )
+                }
             case .failed(let slot, let identity, let message):
+                if slot.provider == .claude {
+                    debugLog("\(slot.id): NOT loaded as .claude — \(message)")
+                }
                 if slot.provider == .claude {
                     let resolvedIdentity = identity
                         ?? LocalIdentity(email: slot.configuredEmail, displayName: nil, organizationName: nil)
+                    // `message` says why the provider could not be queried. On a
+                    // card that still has local values it belongs beside them as
+                    // a note; with no values at all it is the whole story. When
+                    // provider queries are switched off there was nothing to
+                    // explain, so the card is left to speak for its own source.
                     return store.cachedClaudeSnapshot(
                         for: slot,
-                        identity: resolvedIdentity
+                        identity: resolvedIdentity,
+                        note: CredentialStore.claudeProviderQueriesEnabled
+                            ? message
+                            : nil
                     ) ?? AccountSnapshot.unavailable(
                         slot,
                         identity: identity?.preferredDisplay,
@@ -221,6 +275,43 @@ final class DashboardModel: ObservableObject {
                 loaded.slot,
                 detail: friendly(error)
             )
+        }
+    }
+
+    /// Appends a diagnostic line when LIMIT_DASHBOARD_DEBUG=1. A temporary aid
+    /// for confirming which source each account resolved to.
+    private nonisolated static func debugLog(_ message: String) {
+        guard ProcessInfo.processInfo.environment["LIMIT_DASHBOARD_DEBUG"] == "1" else {
+            return
+        }
+        let line = "\(message)\n"
+        let url = URL(fileURLWithPath: "/tmp/limit-dashboard-debug.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? Data(line.utf8).write(to: url)
+        }
+    }
+
+    /// A few words naming the failure, short enough to sit on a card beside the
+    /// values it explains. Without it an unreachable provider is indistinguishable
+    /// from a rejected token.
+    private nonisolated static func compact(_ error: Error) -> String {
+        switch error {
+        case ProviderAPI.RequestError.http(let code, _):
+            return "HTTP \(code)"
+        case ProviderAPI.RequestError.decoding:
+            return "unexpected response"
+        case ProviderAPI.RequestError.invalidResponse:
+            return "invalid response"
+        case ProviderAPI.RequestError.transport:
+            return "transport unavailable"
+        case let urlError as URLError:
+            return "network \(urlError.errorCode)"
+        default:
+            return "unavailable"
         }
     }
 
