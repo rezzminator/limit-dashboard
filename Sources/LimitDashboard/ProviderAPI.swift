@@ -5,10 +5,12 @@ struct ProviderAPI {
         struct Window: Decodable {
             let usedPercent: Double
             let resetAt: Double?
+            let limitWindowSeconds: Double?
 
             enum CodingKeys: String, CodingKey {
                 case usedPercent = "used_percent"
                 case resetAt = "reset_at"
+                case limitWindowSeconds = "limit_window_seconds"
             }
         }
 
@@ -72,7 +74,17 @@ struct ProviderAPI {
             bearer: credential.accessToken,
             headers: ["ChatGPT-Account-ID": credential.accountID]
         )
+        return try decodeCodexSnapshot(data, slot: slot, credential: credential)
+    }
 
+    /// Turns the raw Codex usage body into a snapshot. Kept separate from the
+    /// network call so the window mapping can be checked against a fixture.
+    func decodeCodexSnapshot(
+        _ data: Data,
+        slot: AccountSlot,
+        credential: CodexCredential,
+        now: Date = Date()
+    ) throws -> AccountSnapshot {
         let response: CodexUsageResponse
         do {
             response = try JSONDecoder().decode(CodexUsageResponse.self, from: data)
@@ -80,12 +92,16 @@ struct ProviderAPI {
             throw RequestError.decoding
         }
 
+        // The window's length is read from `limit_window_seconds`, not assumed
+        // from its position. Codex now returns its weekly (604800s) limit as the
+        // primary window with no secondary; hardcoding "5-hour" here mislabeled a
+        // slow weekly quota as a fast one, so the history line looked stuck.
         var windows: [UsageWindow] = []
         if let primary = response.rateLimit?.primaryWindow {
             windows.append(
                 UsageWindow(
                     id: "primary",
-                    title: "5-hour",
+                    title: codexWindowTitle(seconds: primary.limitWindowSeconds),
                     usedPercent: primary.usedPercent,
                     resetAt: primary.resetAt.map(Date.init(timeIntervalSince1970:))
                 )
@@ -95,7 +111,7 @@ struct ProviderAPI {
             windows.append(
                 UsageWindow(
                     id: "secondary",
-                    title: "Weekly",
+                    title: codexWindowTitle(seconds: secondary.limitWindowSeconds),
                     usedPercent: secondary.usedPercent,
                     resetAt: secondary.resetAt.map(Date.init(timeIntervalSince1970:))
                 )
@@ -113,7 +129,7 @@ struct ProviderAPI {
             fableUsage: nil,
             providerAccountID: credential.accountID,
             detail: nil,
-            refreshedAt: Date(),
+            refreshedAt: now,
             duplicatePeer: nil
         )
     }
@@ -258,6 +274,25 @@ struct ProviderAPI {
             return "The local session was rejected. Sign in again in the provider app."
         }
         return String(message.prefix(160))
+    }
+
+    /// Names a Codex window by its actual length rather than its position in the
+    /// response. The two common lengths get familiar names; anything else is
+    /// stated in whole days/hours/minutes so a new window shape is still honest.
+    private func codexWindowTitle(seconds: Double?) -> String {
+        guard let seconds, seconds > 0 else { return "Limit" }
+        let total = Int(seconds.rounded())
+        switch total {
+        case 18_000:
+            return "5-hour"
+        case 604_800:
+            return "Weekly"
+        default:
+            if total % 86_400 == 0 { return "\(total / 86_400)-day" }
+            if total % 3_600 == 0 { return "\(total / 3_600)-hour" }
+            if total % 60 == 0 { return "\(total / 60)-min" }
+            return "\(total)-sec"
+        }
     }
 
     private func friendlyPlan(_ raw: String) -> String {

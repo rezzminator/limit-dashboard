@@ -40,6 +40,11 @@ enum HistoryStoreError: LocalizedError {
 struct HistoryStore: Sendable {
     static let chartWindow: TimeInterval = 24 * 60 * 60
     static let chartBucketSeconds = 5 * 60
+    // Codex reports one weekly window, which moves a couple of points per day.
+    // Read over its own quota period it shows a real climb and its reset; read
+    // over 24 hours it is a flat line, which is why it gets its own chart.
+    static let codexChartWindow: TimeInterval = 7 * 24 * 60 * 60
+    static let codexChartBucketSeconds = 30 * 60
     static let retentionWindow: TimeInterval = 90 * 24 * 60 * 60
 
     let databaseURL: URL
@@ -168,9 +173,13 @@ struct HistoryStore: Sendable {
         }
     }
 
+    /// Loads saved primary-window readings. `slotID` limits the result to one
+    /// account, which lets a provider whose window length differs be charted on
+    /// its own time and value scale instead of being flattened onto a shared one.
     func loadPrimaryUsedPoints(
         since start: Date,
-        bucketSeconds: Int = Self.chartBucketSeconds
+        bucketSeconds: Int = Self.chartBucketSeconds,
+        slotID: String? = nil
     ) throws -> [ChartPoint] {
         precondition(bucketSeconds > 0)
         return try withDatabase { database in
@@ -182,6 +191,7 @@ struct HistoryStore: Sendable {
                     AVG(used_percent)
                 FROM quota_snapshots
                 WHERE is_primary = 1 AND captured_at >= ?
+                    AND (?4 IS NULL OR slot_id = ?4)
                 GROUP BY slot_id, bucket_key
                 ORDER BY first_measurement ASC, slot_id ASC
                 """
@@ -195,6 +205,11 @@ struct HistoryStore: Sendable {
             sqlite3_bind_int64(statement, 1, Int64(bucketSeconds))
             sqlite3_bind_int64(statement, 2, Int64(bucketSeconds))
             sqlite3_bind_double(statement, 3, start.timeIntervalSince1970)
+            if let slotID {
+                try bind(slotID, to: 4, statement: statement, database: database)
+            } else {
+                sqlite3_bind_null(statement, 4)
+            }
 
             var points: [ChartPoint] = []
             var stepResult = sqlite3_step(statement)

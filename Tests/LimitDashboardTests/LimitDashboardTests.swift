@@ -13,10 +13,10 @@ final class LimitDashboardTests: XCTestCase {
                 .map(\.title),
             ["Claude Account 1", "Claude Account 2", "Claude Account 3"]
         )
+        // Identity comes from each slot's own registry file; the checked-in
+        // configuration names no one's mailbox.
         XCTAssertTrue(
-            AccountSlot.configured
-                .filter { $0.provider == .claude }
-                .allSatisfy { $0.configuredEmail?.contains("@") == true }
+            AccountSlot.configured.allSatisfy { $0.configuredEmail == nil }
         )
     }
 
@@ -888,7 +888,7 @@ final class LimitDashboardTests: XCTestCase {
             databaseURL: directory.appendingPathComponent("history.sqlite3")
         )
         let idleSlots = AccountSlot.configured.filter {
-            $0.id == "claude-gmail" || $0.id == "claude-khosravi"
+            $0.id == "claude-1" || $0.id == "claude-3"
         }
         XCTAssertEqual(idleSlots.count, 2)
 
@@ -945,7 +945,11 @@ final class LimitDashboardTests: XCTestCase {
                     "scope": ["model": ["id": NSNull(), "display_name": "Fable"]],
                     "is_active": false
                 ]]
-            ]
+            ],
+            // Pinned before the entry's own reset. Read against the wall clock
+            // this passed until that timestamp went by, then began failing for
+            // a reason unrelated to what it checks.
+            now: Date(timeIntervalSince1970: 1_785_000_000)
         )
         XCTAssertEqual(fable?.title, "Fable usage")
         XCTAssertEqual(fable?.usedPercent, 24)
@@ -1142,6 +1146,224 @@ final class LimitDashboardTests: XCTestCase {
         XCTFail("Expected the existing local Codex sign-in.")
     }
 
+    func testClaudeCredentialsAreReadableWithoutAnAuthorizationPrompt() throws {
+        guard ProcessInfo.processInfo.environment["LIMIT_DASHBOARD_LIVE_TESTS"] == "1" else {
+            throw XCTSkip("Reads the real login Keychain; opt-in.")
+        }
+        // Claude Code's items admit only the `apple-tool:` partition, so a
+        // direct SecItemCopyMatching from this app raises the authorization
+        // panel on every launch no matter how often "Always Allow" is chosen.
+        // Reading through /usr/bin/security uses an ACL entry macOS already
+        // grants. A regression here is silent apart from the panel returning,
+        // so the read is asserted to complete on its own.
+        for slot in AccountSlot.configured where slot.provider == .claude {
+            let configDirectory = try XCTUnwrap(
+                CredentialStore().claudeConfigDirectory(for: slot)
+            )
+            let service = CredentialStore.claudeKeychainService(
+                forConfigDirectory: configDirectory
+            )
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+            process.arguments = [
+                "find-generic-password", "-s", service, "-a", NSUserName(), "-w",
+            ]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = Pipe()
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            XCTAssertEqual(
+                process.terminationStatus,
+                0,
+                "\(slot.id): /usr/bin/security could not read the credential."
+            )
+            XCTAssertFalse(
+                data.isEmpty,
+                "\(slot.id): the credential read returned nothing."
+            )
+        }
+    }
+
+    func testVertexAccountsKeepSeparateCredentialsAndProjects() throws {
+        let configURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vertex-accounts-\(UUID().uuidString).json")
+        try Data("""
+        [
+          {"id": "vertex-default", "label": "Personal",
+           "configDirectory": null, "project": null},
+          {"id": "vertex-second", "label": "Second",
+           "configDirectory": ".config/gcloud-second",
+           "project": "second-project"}
+        ]
+        """.utf8).write(to: configURL)
+        defer { try? FileManager.default.removeItem(at: configURL) }
+
+        let accounts = VertexAccount.loadConfigured(from: configURL)
+        XCTAssertEqual(accounts.count, 2)
+
+        // The first account must stay on the machine's own gcloud config, so
+        // adding a second sign-in cannot change what it reports.
+        let primary = try XCTUnwrap(accounts.first)
+        XCTAssertNil(primary.configDirectory)
+        XCTAssertNil(primary.resolvedConfigDirectory)
+        XCTAssertNil(primary.project)
+
+        // The second reads its own config directory and names its own project.
+        let secondary = accounts[1]
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        XCTAssertEqual(secondary.project, "second-project")
+        XCTAssertEqual(
+            secondary.resolvedConfigDirectory,
+            home + "/.config/gcloud-second"
+        )
+        XCTAssertNotEqual(primary.id, secondary.id)
+
+        // A machine without the file still reports its own gcloud identity.
+        let fallback = VertexAccount.loadConfigured(
+            from: configURL.deletingPathExtension()
+                .appendingPathExtension("missing.json")
+        )
+        XCTAssertEqual(fallback.count, 1)
+        XCTAssertNil(fallback[0].configDirectory)
+    }
+
+    func testHistoryCanBeReadForOneSlotWithoutDisturbingTheSharedRead() throws {
+        // Codex is charted on its own panel, which needs its slot's readings
+        // alone. Passing no slot must still return every account, so the shared
+        // 24-hour chart is unaffected.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = HistoryStore(
+            databaseURL: directory.appendingPathComponent("history.sqlite3")
+        )
+        let claudeSlot = try XCTUnwrap(
+            AccountSlot.configured.first { $0.provider == .claude }
+        )
+        let codexSlot = try XCTUnwrap(
+            AccountSlot.configured.first { $0.provider == .codex }
+        )
+        let at = Date(timeIntervalSince1970: 1_900_000_000)
+
+        func snapshot(_ slot: AccountSlot, used: Double) -> AccountSnapshot {
+            AccountSnapshot(
+                id: slot.id,
+                slot: slot,
+                identity: "account",
+                plan: "Plan",
+                state: .live,
+                windows: [
+                    UsageWindow(
+                        id: "primary",
+                        title: "Weekly",
+                        usedPercent: used,
+                        resetAt: nil
+                    )
+                ],
+                fableUsage: nil,
+                providerAccountID: nil,
+                detail: nil,
+                refreshedAt: at,
+                duplicatePeer: nil
+            )
+        }
+
+        try store.record(
+            [snapshot(claudeSlot, used: 11), snapshot(codexSlot, used: 57)],
+            at: at
+        )
+
+        let codexOnly = try store.loadPrimaryUsedPoints(
+            since: at.addingTimeInterval(-60),
+            slotID: codexSlot.id
+        )
+        XCTAssertEqual(codexOnly.map(\.value), [57])
+        XCTAssertEqual(Set(codexOnly.map(\.seriesID)), [codexSlot.id])
+
+        let everything = try store.loadPrimaryUsedPoints(
+            since: at.addingTimeInterval(-60)
+        )
+        XCTAssertEqual(everything.map(\.value).sorted(), [11, 57])
+    }
+
+    func testCodexPrimaryWeeklyWindowIsLabeledWeeklyNotFiveHour() throws {
+        // The real Pro payload: a single 7-day (604800s) primary window and no
+        // secondary. The primary window must be named "Weekly" — labeling it
+        // "5-hour" is what made the history line look stuck at mid-scale.
+        let payload = """
+        {
+          "plan_type": "pro",
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 57,
+              "limit_window_seconds": 604800,
+              "reset_at": 1785902971
+            },
+            "secondary_window": null
+          }
+        }
+        """
+        let slot = try XCTUnwrap(AccountSlot.configured.first { $0.provider == .codex })
+        let credential = CodexCredential(
+            accessToken: "t",
+            accountID: "acct-1",
+            identity: LocalIdentity(email: "a@b.com", displayName: nil, organizationName: nil)
+        )
+        let snapshot = try ProviderAPI().decodeCodexSnapshot(
+            Data(payload.utf8),
+            slot: slot,
+            credential: credential
+        )
+        XCTAssertEqual(snapshot.windows.count, 1)
+        let primary = try XCTUnwrap(snapshot.windows.first)
+        XCTAssertEqual(primary.id, "primary")
+        XCTAssertEqual(primary.title, "Weekly")
+        XCTAssertEqual(primary.usedPercent, 57)
+        XCTAssertNotEqual(primary.title, "5-hour")
+    }
+
+    func testCodexWindowTitlesFollowTheirActualLength() throws {
+        // Both familiar lengths and an unusual one, proving the title is derived
+        // from limit_window_seconds rather than the window's position.
+        let payload = """
+        {
+          "plan_type": "pro",
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 12,
+              "limit_window_seconds": 18000,
+              "reset_at": 1785902971
+            },
+            "secondary_window": {
+              "used_percent": 40,
+              "limit_window_seconds": 259200,
+              "reset_at": 1786115271
+            }
+          }
+        }
+        """
+        let slot = try XCTUnwrap(AccountSlot.configured.first { $0.provider == .codex })
+        let credential = CodexCredential(
+            accessToken: "t",
+            accountID: "acct-1",
+            identity: LocalIdentity(email: "a@b.com", displayName: nil, organizationName: nil)
+        )
+        let snapshot = try ProviderAPI().decodeCodexSnapshot(
+            Data(payload.utf8),
+            slot: slot,
+            credential: credential
+        )
+        XCTAssertEqual(snapshot.windows.map(\.title), ["5-hour", "3-day"])
+        XCTAssertEqual(snapshot.windows.map(\.id), ["primary", "secondary"])
+    }
+
     func testLiveProviderRequestsUseTheAppImplementation() async throws {
         guard ProcessInfo.processInfo.environment["LIMIT_DASHBOARD_LIVE_TESTS"] == "1" else {
             throw XCTSkip("Live provider network validation is opt-in.")
@@ -1197,13 +1419,13 @@ final class LimitDashboardTests: XCTestCase {
         )
         XCTAssertEqual(
             CredentialStore.claudeKeychainService(
-                forConfigDirectory: "/Users/reza/.claude2"
+                forConfigDirectory: NSHomeDirectory() + "/.claude2"
             ),
             "Claude Code-credentials-dceab1ac"
         )
         XCTAssertEqual(
             CredentialStore.claudeKeychainService(
-                forConfigDirectory: "/Users/reza/.claude3"
+                forConfigDirectory: NSHomeDirectory() + "/.claude3"
             ),
             "Claude Code-credentials-f90b25d2"
         )
@@ -1264,7 +1486,7 @@ final class LimitDashboardTests: XCTestCase {
     func testSessionRenewalIsThrottledSoPollingCannotSpawnHelperProcesses() {
         let throttle = SessionRenewalThrottle()
         let now = Date(timeIntervalSince1970: 2_000_000_000)
-        let account = "/Users/reza/.claude3"
+        let account = NSHomeDirectory() + "/.claude3"
 
         XCTAssertTrue(throttle.beginAttempt(for: account, now: now))
         XCTAssertFalse(
@@ -1280,7 +1502,7 @@ final class LimitDashboardTests: XCTestCase {
         )
         XCTAssertTrue(
             throttle.beginAttempt(
-                for: "/Users/reza/.claude2",
+                for: NSHomeDirectory() + "/.claude2",
                 now: now.addingTimeInterval(1)
             ),
             "Throttling is per account, not global."

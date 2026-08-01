@@ -47,6 +47,14 @@ struct CredentialStore: Sendable {
     /// rendering, so a sample this recent is the provider's current state.
     static let statusLineLiveWindow: TimeInterval = 5 * 60
     static let statusLineSnapshotLifetime: TimeInterval = 60 * 60
+    /// How long to wait for Claude Code's renewal to reach the Keychain after
+    /// `auth status` has already exited.
+    static let renewalSettleWindow: TimeInterval = 8
+    /// Claude Code refuses to renew a credential that has already expired — a
+    /// cold start gates on validity and answers "Not logged in" without ever
+    /// attempting the exchange. The only reliable moment to renew is therefore
+    /// shortly *before* expiry, while the stored session is still accepted.
+    static let proactiveRenewalMargin: TimeInterval = 15 * 60
     private let claudeRateLimitsDirectory: URL
     private let claudeBackupsDirectoryOverride: URL?
 
@@ -81,12 +89,15 @@ struct CredentialStore: Sendable {
 
         guard
             let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
-            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let cached = root["cachedUsageUtilization"] as? [String: Any],
-            let utilization = cached["utilization"] as? [String: Any]
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             return nil
         }
+        // Claude Code deletes this block whenever it considers itself signed
+        // out, so its absence must not silence the status-line harvest — that
+        // source keeps reporting as long as any session is running.
+        let cached = root["cachedUsageUtilization"] as? [String: Any]
+        let utilization = cached?["utilization"] as? [String: Any] ?? [:]
         let stateModifiedAt = (
             try? url.resourceValues(forKeys: [.contentModificationDateKey])
         )?.contentModificationDate
@@ -99,7 +110,7 @@ struct CredentialStore: Sendable {
         )
         let plan = claudePlan(from: account)
 
-        guard cacheMatchesClaudeIdentity(root: root, cached: cached) else {
+        if let cached, !cacheMatchesClaudeIdentity(root: root, cached: cached) {
             return AccountSnapshot.quotaUnavailable(
                 slot,
                 identity: registryIdentity.preferredDisplay ?? slot.localLabel,
@@ -109,7 +120,7 @@ struct CredentialStore: Sendable {
         }
 
         let cachedFetchedAt: Date?
-        if let milliseconds = cached["fetchedAtMs"] as? Double {
+        if let milliseconds = cached?["fetchedAtMs"] as? Double {
             cachedFetchedAt = Date(timeIntervalSince1970: milliseconds / 1_000)
         } else {
             cachedFetchedAt = nil
@@ -223,7 +234,7 @@ struct CredentialStore: Sendable {
         let snapshotDetail = note.map { "\(baseDetail) · \($0)" } ?? baseDetail
 
         let providerAccountID = (account?["accountUuid"] as? String)
-            ?? (cached["accountUuid"] as? String)
+            ?? (cached?["accountUuid"] as? String)
 
         return AccountSnapshot(
             id: slot.id,
@@ -270,23 +281,58 @@ struct CredentialStore: Sendable {
             )
         }
         if credential.isUsable(now: now) {
+            // Renew while renewal is still possible: once this token expires,
+            // no cold-started helper can bring it back, and the dashboard is
+            // left waiting for the user to open the account by hand.
+            if
+                let expiresAt = credential.expiresAt,
+                expiresAt.timeIntervalSince(now) < Self.proactiveRenewalMargin,
+                renewClaudeSession(for: slot, currentExpiry: expiresAt),
+                let renewed = claudeKeychainCredential(for: slot, identity: identity),
+                renewed.isUsable(now: now)
+            {
+                return .claude(slot, renewed)
+            }
             return .claude(slot, credential)
         }
 
-        // The token has expired. Rather than exchange the refresh token itself —
-        // which rotates it, and would strand Claude Code with an invalidated copy
-        // unless this app also wrote the replacement back — ask Claude Code to
-        // renew its own session. `auth status` performs no model call, so this
-        // costs no quota, and credential writing stays entirely with the tool
-        // that owns it.
+        // The reading may simply be the memoised copy from before Claude Code
+        // renewed — using this account renews it, and that write is invisible
+        // until the remembered copy is dropped. Re-read once against the
+        // Keychain before concluding anything is wrong.
+        if let configDirectory = claudeConfigDirectory(for: slot) {
+            KeychainCache.shared.invalidate(
+                Self.claudeKeychainService(forConfigDirectory: configDirectory)
+            )
+            if
+                let current = claudeKeychainCredential(for: slot, identity: identity),
+                current.isUsable(now: now)
+            {
+                return .claude(slot, current)
+            }
+        }
+
+        // The token has expired. Claude Code is asked anyway — today's CLI
+        // refuses this case, but the attempt is free and a future version may
+        // handle it — and letting the tool that owns the credential renew it
+        // keeps this app out of the write path entirely.
         if
-            renewClaudeSession(for: slot),
+            renewClaudeSession(for: slot, currentExpiry: credential.expiresAt),
             let renewed = claudeKeychainCredential(for: slot, identity: identity),
             renewed.isUsable(now: now)
         {
             return .claude(slot, renewed)
         }
 
+        // This app does not exchange the refresh token.
+        //
+        // It did once, under the same lock Claude Code uses and with write-back,
+        // and it still signed every account out. The refresh token is a single
+        // server-side lineage: exchanging it retires the previous one for every
+        // holder, so a copy written back a moment later is already too late for
+        // any process that read the credential in between — and Claude Code
+        // keeps long-lived sessions in memory. Writing credentials at all is
+        // therefore left to the tool that owns them.
         let expiredFor = credential.expiresAt.map {
             " \(snapshotAge($0, now: now)) ago"
         } ?? ""
@@ -297,9 +343,19 @@ struct CredentialStore: Sendable {
         )
     }
 
-    /// Asks Claude Code to validate — and therefore renew — the session for one
-    /// config directory. Returns true when the stored credential changed.
-    private func renewClaudeSession(for slot: AccountSlot) -> Bool {
+    /// Asks Claude Code to renew the session for one config directory.
+    ///
+    /// Stage one is `auth status`: it makes no model call, so it costs no
+    /// quota. Stage two — reached only when stage one landed nothing — sends a
+    /// single minimal Haiku prompt through Claude Code itself, because a real
+    /// API call is the one context in which Claude Code exercises its own
+    /// refresh-and-persist path. Whether anything is actually exchanged stays
+    /// entirely Claude Code's decision, so a token that does not need renewing
+    /// is left untouched. Both stages together are one throttled attempt.
+    private func renewClaudeSession(
+        for slot: AccountSlot,
+        currentExpiry: Date?
+    ) -> Bool {
         guard
             let configDirectory = claudeConfigDirectory(for: slot),
             SessionRenewalThrottle.shared.beginAttempt(for: configDirectory),
@@ -307,14 +363,70 @@ struct CredentialStore: Sendable {
         else {
             return false
         }
+        let service = Self.claudeKeychainService(forConfigDirectory: configDirectory)
 
+        // Only ever `status`. `login`/`logout` would change the sign-in state.
+        let statusRan = runClaudeHelper(
+            binary: binary,
+            arguments: ["auth", "status"],
+            configDirectory: configDirectory,
+            timeout: 20
+        )
+        if statusRan, settleForRenewedCredential(service: service, laterThan: currentExpiry) {
+            return true
+        }
+
+        // The prompt asks for one word from the smallest model, and `--max-turns
+        // 1` keeps it a single exchange. This is indistinguishable from the user
+        // typing into a session, so the renewal it triggers is the same one
+        // normal use performs — no client this app controls touches the tokens.
+        // `--setting-sources project` keeps the user's global hooks out of this
+        // run: a helper spawned by the dashboard must never trigger the side
+        // effects — notification sounds, git syncs, their Keychain and privacy
+        // prompts — that the user's own sessions opt into. (`--bare` is not an
+        // option: it skips credential loading and reports "Not logged in" even
+        // for a valid session.)
+        let ackRan = runClaudeHelper(
+            binary: binary,
+            arguments: [
+                "-p", "ONLY reply with ack",
+                "--model", "haiku",
+                "--max-turns", "1",
+                "--setting-sources", "project",
+            ],
+            configDirectory: configDirectory,
+            timeout: 45
+        )
+        if ackRan, settleForRenewedCredential(service: service, laterThan: currentExpiry) {
+            return true
+        }
+
+        // Nothing landed in time. A renewal may still complete afterwards, so
+        // when either stage ran the caller re-reads once and the next poll
+        // picks up any late write.
+        KeychainCache.shared.invalidate(service)
+        return statusRan || ackRan
+    }
+
+    private func runClaudeHelper(
+        binary: URL,
+        arguments: [String],
+        configDirectory: String,
+        timeout: TimeInterval
+    ) -> Bool {
         let process = Process()
         process.executableURL = binary
-        // Only ever `status`. `login`/`logout` would change the sign-in state.
-        process.arguments = ["auth", "status"]
+        process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["CLAUDE_CONFIG_DIR"] = configDirectory
         process.environment = environment
+        // An app launched from Finder runs with "/" as its working directory,
+        // and the helper treats its working directory as a project to inspect.
+        // Its own config directory is a contained place to stand instead.
+        process.currentDirectoryURL = URL(
+            fileURLWithPath: configDirectory,
+            isDirectory: true
+        )
         let output = Pipe()
         process.standardOutput = output
         process.standardError = Pipe()
@@ -326,7 +438,7 @@ struct CredentialStore: Sendable {
         }
 
         // A wedged helper must not hold the refresh cycle open indefinitely.
-        let deadline = Date().addingTimeInterval(20)
+        let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning, Date() < deadline {
             usleep(50_000)
         }
@@ -335,14 +447,39 @@ struct CredentialStore: Sendable {
             return false
         }
         _ = try? output.fileHandleForReading.readToEnd()
-        guard process.terminationStatus == 0 else { return false }
+        return process.terminationStatus == 0
+    }
 
-        // Claude Code may have written a new token; drop the memoised copy so the
-        // next read sees it.
-        KeychainCache.shared.invalidate(
-            Self.claudeKeychainService(forConfigDirectory: configDirectory)
-        )
-        return true
+    /// Waits for Claude Code's asynchronous credential write to land.
+    ///
+    /// The helper prints and exits before its renewal has been written, so
+    /// reading the moment it returns finds the old token, concludes the
+    /// renewal failed, and then declines to try again until the throttle
+    /// clears — leaving an account stale for the whole interval even though
+    /// it was renewed a second later. Success requires an expiry strictly
+    /// after the one renewal started from: during a pre-expiry renewal the
+    /// old token is itself still valid, so "any future expiry" would report
+    /// the unchanged credential as a fresh one.
+    private func settleForRenewedCredential(
+        service: String,
+        laterThan baseline: Date?
+    ) -> Bool {
+        let settleDeadline = Date().addingTimeInterval(Self.renewalSettleWindow)
+        while Date() < settleDeadline {
+            usleep(200_000)
+            KeychainCache.shared.invalidate(service)
+            if let secret = keychainSecret(service: service),
+               let root = try? JSONSerialization.jsonObject(with: secret) as? [String: Any],
+               let oauth = root["claudeAiOauth"] as? [String: Any],
+               let expiresAtMs = oauth["expiresAt"] as? Double {
+                let expiresAt = Date(timeIntervalSince1970: expiresAtMs / 1_000)
+                if expiresAt > Date(), expiresAt > (baseline ?? .distantPast) {
+                    return true
+                }
+            }
+        }
+        KeychainCache.shared.invalidate(service)
+        return false
     }
 
     private static func claudeBinaryURL() -> URL? {
@@ -410,7 +547,8 @@ struct CredentialStore: Sendable {
             expiresAt: expiresAt,
             identity: identity,
             plan: claudePlan(from: account),
-            providerAccountID: account?["accountUuid"] as? String
+            providerAccountID: account?["accountUuid"] as? String,
+            refreshToken: oauth["refreshToken"] as? String
         )
     }
 
@@ -432,21 +570,54 @@ struct CredentialStore: Sendable {
         if let remembered = KeychainCache.shared.remembered(for: service) {
             return remembered.data
         }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: NSUserName(),
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
+        // Read through /usr/bin/security rather than SecItemCopyMatching.
+        //
+        // Claude Code's items carry a partition list of `apple-tool:` only, and
+        // one of their ACL entries names /usr/bin/security directly. A request
+        // from this app matches neither: the certificate is self-signed, so
+        // there is no Team ID for the partition to admit, and "Always Allow"
+        // cannot record a grant that would ever satisfy it — which is why the
+        // authorization panel returned on every launch. Apple's own tool is
+        // already inside the item's access list, so this path reads the same
+        // secret through an entry macOS has granted, without asking again and
+        // without modifying anything in the login keychain.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        // The service name is not secret; the secret only ever comes back on
+        // stdout and is never placed in arguments, environment, or a log.
+        process.arguments = [
+            "find-generic-password",
+            "-s", service,
+            "-a", NSUserName(),
+            "-w",
         ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else {
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+        } catch {
             KeychainCache.shared.storeFailure(for: service)
             return nil
         }
-        KeychainCache.shared.store(data, for: service)
-        return data
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            KeychainCache.shared.storeFailure(for: service)
+            return nil
+        }
+        // `-w` prints the secret followed by a newline.
+        let secret = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !secret.isEmpty else {
+            KeychainCache.shared.storeFailure(for: service)
+            return nil
+        }
+        let secretData = Data(secret.utf8)
+        KeychainCache.shared.store(secretData, for: service)
+        return secretData
     }
 
     private func loadCodex(_ slot: AccountSlot) -> LoadedCredential {

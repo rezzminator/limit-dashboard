@@ -1,7 +1,20 @@
 # Limit Dashboard
 
-A single-window native macOS dashboard for the three local Claude Code profiles
-and the local Codex subscription on this Mac.
+**One quiet, native macOS window for every AI subscription limit you have.**
+
+Limit Dashboard is a local-only SwiftUI app that tracks, on one screen:
+
+- **Claude** (claude.ai / Claude Code) usage limits — the 5-hour, 7-day, and
+  model-scoped weekly windows — for up to three signed-in accounts, with live
+  reset countdowns and a 24-hour usage-history chart
+- **OpenAI Codex** (ChatGPT subscription) rate-limit windows, with its own
+  7-day chart
+- **Google Vertex AI** token usage and estimated list-price spend across
+  multiple gcloud accounts, read from Cloud Monitoring
+
+Everything runs on your Mac: the app reads only the sessions already signed in
+locally, talks to nothing except the providers themselves, and keeps its
+history in a local SQLite file. No analytics, no accounts, no cloud.
 
 ## Run
 
@@ -89,15 +102,39 @@ latest real source observation, it removes those invalid rows.
 ```
 
 Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
-For live Claude quota, the `curl_cffi` runtime from
-`~/work/harvester-web-mcp/.venv/bin/python` must also exist. Set
-`LIMIT_DASHBOARD_CURL_CFFI_PYTHON` to another Python executable when
-`curl_cffi` is installed elsewhere.
+For live Claude quota, a Python interpreter with
+[`curl_cffi`](https://pypi.org/project/curl-cffi/) installed is also needed:
+point `LIMIT_DASHBOARD_CURL_CFFI_PYTHON` at it (`pip install curl_cffi` in any
+venv). Without it, Claude cards fall back to the local snapshot sources.
+
+## Configuring accounts
+
+- **Claude** slots map to `~/.claude.json`, `~/.claude2/.claude.json`, and
+  `~/.claude3/.claude.json` — the default plus two `CLAUDE_CONFIG_DIR`
+  profiles. Slots with no signed-in profile simply report as unavailable.
+- **Vertex AI** accounts are read from
+  `~/.config/limit-dashboard/vertex_accounts.json` when it exists. Each entry
+  has an `id`, a display `label`, an optional home-relative `configDirectory`
+  (used as `CLOUDSDK_CONFIG`, `null` for the machine default), and an optional
+  `project` (`null` uses that config's active project):
+
+  ```json
+  [
+    {"id": "vertex-default", "label": "Personal",
+     "configDirectory": null, "project": null},
+    {"id": "vertex-work", "label": "Work",
+     "configDirectory": ".config/gcloud-work", "project": "my-work-project"}
+  ]
+  ```
+
+  Without the file, the machine's default gcloud identity is shown alone.
 
 ## Credential and network behavior
 
-- By default the app does not access the macOS Keychain and never triggers a
-  Keychain prompt. Only `LIMIT_DASHBOARD_CLAUDE_API=1` changes that; see below.
+- By default the app does not access the macOS Keychain. Only
+  `LIMIT_DASHBOARD_CLAUDE_API=1` changes that; see below. With the flag on it
+  still raises no authorization prompt, because it reads — and only ever
+  reads — through `/usr/bin/security` rather than as itself.
 - Claude identities and fallback usage snapshots come from each local account
   state file: `~/.claude.json`, `~/.claude2/.claude.json`, and
   `~/.claude3/.claude.json`.
@@ -147,10 +184,35 @@ For live Claude quota, the `curl_cffi` runtime from
   - `https://chatgpt.com/backend-api/wham/usage` (Codex)
   - `https://claude.ai/api/oauth/usage` (Claude) — **only** when
     `LIMIT_DASHBOARD_CLAUDE_API=1`.
-- The app never asks for passwords, directly refreshes tokens, rotates refresh
-  tokens, overwrites credentials, or exports credentials. When an access token
-  has expired it runs `CLAUDE_CONFIG_DIR=<account> claude auth status`, which
-  performs no model call and lets Claude Code renew and persist its own session.
+- The app never asks for passwords and never exports or writes credentials.
+  Session renewal belongs to Claude Code alone. Claude Code refuses to renew a
+  credential that has already expired — a cold start answers "Not logged in"
+  without attempting the exchange — so shortly *before* a stored session
+  expires, the app asks Claude Code to renew it: first
+  `CLAUDE_CONFIG_DIR=<account> claude auth status`, which performs no model
+  call; if nothing lands, a single minimal Haiku prompt
+  (`claude -p "ONLY reply with ack" --max-turns 1`), because a real API call
+  is the one context in which Claude Code exercises its own refresh-and-persist
+  path. Whether anything is exchanged stays Claude Code's decision — a token
+  that does not need renewing is left untouched. Attempts are throttled to one
+  per account per ten minutes, inside the final minutes before expiry.
+- Helper runs use `--setting-sources project`, so the user's global hooks —
+  notification sounds, git syncs, and their Keychain or privacy prompts —
+  never fire from inside the dashboard.
+- This app does not exchange OAuth refresh tokens itself. It did once, under
+  the same lock Claude Code uses and with atomic write-back, and it still
+  signed every account out: the refresh token is a single server-side lineage,
+  and long-lived Claude Code sessions keep credentials in memory. Writing
+  credentials is therefore left entirely to the tool that owns them. An
+  account whose credential has fully expired is reported on its card — with
+  every local fallback source still shown — until it is opened once by hand.
+- The Keychain is read — never written — through `/usr/bin/security`, which the
+  items' own access list already admits. Claude Code's credentials carry a
+  partition list of `apple-tool:` only; a direct `SecItemCopyMatching` from this
+  app matches no partition, so macOS raised an authorization prompt on every
+  launch no matter how often "Always Allow" was chosen. Apple's own tool is
+  inside the items' access list, so reading through it asks nothing and
+  modifies nothing.
 
 Claude cards query the provider at the selected interval when the feature flag
 is enabled. They also refresh their non-Keychain fallback view, so an update to

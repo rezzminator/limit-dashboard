@@ -34,10 +34,23 @@ iconutil -c icns "$ICON_WORK/AppIcon.iconset" -o "$APP_PATH/Contents/Resources/A
 # gives a designated requirement of the form
 #   identifier "local.reza.limitdashboard" and certificate root = H"..."
 # which is unchanged by rebuilding, so "Always Allow" is granted once and holds.
+#
+# The certificate must also be TRUSTED for code signing. Without trust settings
+# it reports CSSMERR_TP_NOT_TRUSTED, macOS cannot validate the identity recorded
+# by "Always Allow", and every launch asks for the Keychain password again. The
+# check below catches that, because a signature that verifies on disk does not
+# by itself prove the identity will satisfy a Keychain ACL.
 SIGNING_IDENTITY="Limit Dashboard Local Signing"
 if security find-certificate -c "$SIGNING_IDENTITY" >/dev/null 2>&1; then
     codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_PATH"
     echo "Signed with: $SIGNING_IDENTITY"
+    if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGNING_IDENTITY"; then
+        echo "WARNING: '$SIGNING_IDENTITY' is not trusted for code signing."
+        echo "         The Keychain will keep prompting until you run:"
+        echo "           security find-certificate -c '$SIGNING_IDENTITY' -p > /tmp/ld.pem"
+        echo "           security add-trusted-cert -r trustRoot -p codeSign \\"
+        echo "             -k ~/Library/Keychains/login.keychain-db /tmp/ld.pem"
+    fi
 else
     # Falls back to ad-hoc so the build still succeeds on a machine without the
     # certificate; Keychain approval will then be asked for on each rebuild.

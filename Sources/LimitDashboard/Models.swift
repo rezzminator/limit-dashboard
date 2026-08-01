@@ -45,29 +45,29 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
 
     static let configured: [AccountSlot] = [
         AccountSlot(
-            id: "claude-gmail",
+            id: "claude-1",
             provider: .claude,
             title: "Claude Account 1",
             localLabel: "account 1",
-            configuredEmail: "mrez9090@gmail.com",
+            configuredEmail: nil,
             claudeStatePath: ".claude.json",
             position: 0
         ),
         AccountSlot(
-            id: "claude-freudche",
+            id: "claude-2",
             provider: .claude,
             title: "Claude Account 2",
             localLabel: "account 2",
-            configuredEmail: "reza.khosravivala@gmail.com",
+            configuredEmail: nil,
             claudeStatePath: ".claude2/.claude.json",
             position: 1
         ),
         AccountSlot(
-            id: "claude-khosravi",
+            id: "claude-3",
             provider: .claude,
             title: "Claude Account 3",
             localLabel: "account 3",
-            configuredEmail: "reza@intuita.health",
+            configuredEmail: nil,
             claudeStatePath: ".claude3/.claude.json",
             position: 2
         ),
@@ -274,6 +274,9 @@ struct ClaudeCredential: Sendable {
     let identity: LocalIdentity
     let plan: String
     let providerAccountID: String?
+    /// Present so an expired session can be exchanged for a new one. It is held
+    /// only for the length of that exchange and is never logged or displayed.
+    var refreshToken: String?
 
     func isUsable(now: Date = Date()) -> Bool {
         guard !accessToken.isEmpty else { return false }

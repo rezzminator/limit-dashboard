@@ -5,23 +5,42 @@ import Foundation
 final class DashboardModel: ObservableObject {
     @Published private(set) var snapshots: [AccountSnapshot] =
         AccountSlot.configured.map(AccountSnapshot.loading)
+    // The shared 24-hour chart carries only the providers whose primary window is
+    // short enough to move within it. Codex's weekly window is charted on its own
+    // panel, over its own period and value range.
     @Published private(set) var historySeries: [ChartSeries] =
-        AccountSlot.configured.map {
-            ChartSeries(
-                id: $0.id,
-                label: $0.title,
-                unit: .percentUsed,
-                points: []
-            )
-        }
+        AccountSlot.configured
+            .filter { $0.provider == .claude }
+            .map {
+                ChartSeries(
+                    id: $0.id,
+                    label: $0.title,
+                    unit: .percentUsed,
+                    points: []
+                )
+            }
+    @Published private(set) var codexSeries: ChartSeries?
     @Published private(set) var historyError: String?
-    @Published private(set) var vertexReport: VertexReport?
-    @Published private(set) var vertexError: String?
+    @Published private(set) var vertexReports: [VertexAccountReport] =
+        VertexAccount.configured.map {
+            VertexAccountReport(account: $0, report: nil, error: nil)
+        }
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdated: Date?
     private var refreshInFlight: Task<Void, Never>?
     private let historyStore = HistoryStore()
     private var lastVertexAttempt: Date?
+
+    private static let codexSlotID: String? = AccountSlot.configured
+        .first { $0.provider == .codex }?.id
+
+    var codexSnapshot: AccountSnapshot? {
+        snapshots.first { $0.slot.provider == .codex }
+    }
+
+    var claudeSnapshots: [AccountSnapshot] {
+        snapshots.filter { $0.slot.provider == .claude }
+    }
 
     var liveCount: Int {
         snapshots.filter { $0.state == .live }.count
@@ -116,15 +135,27 @@ final class DashboardModel: ObservableObject {
 
         let capturedAt = Date()
         let historyStore = historyStore
+        let codexSlotID = Self.codexSlotID
         let historyResult = await Task.detached(
             priority: .utility
-        ) { [historyStore, finalizedResults, capturedAt] in
+        ) { [historyStore, finalizedResults, capturedAt, codexSlotID] in
             do {
                 try historyStore.record(finalizedResults, at: capturedAt)
                 let points = try historyStore.loadPrimaryUsedPoints(
                     since: capturedAt.addingTimeInterval(-HistoryStore.chartWindow)
                 )
-                return HistoryRefreshResult.success(points)
+                // Codex is read over its own weekly period so its climb and its
+                // reset are visible rather than flattened into 24 hours.
+                let codexPoints = try codexSlotID.map { slotID in
+                    try historyStore.loadPrimaryUsedPoints(
+                        since: capturedAt.addingTimeInterval(
+                            -HistoryStore.codexChartWindow
+                        ),
+                        bucketSeconds: HistoryStore.codexChartBucketSeconds,
+                        slotID: slotID
+                    )
+                } ?? []
+                return HistoryRefreshResult.success(points, codexPoints)
             } catch {
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? "Local history is temporarily unavailable."
@@ -133,23 +164,53 @@ final class DashboardModel: ObservableObject {
         }.value
         applyHistoryResult(historyResult)
 
+        // Cloud Monitoring data changes slowly, so a good report is held for the
+        // full interval. A failure is different: it usually means the account
+        // needs signing in again, and once that is done the fix should show up
+        // promptly rather than after the next quarter-hour.
+        let vertexInterval = vertexReports.contains { $0.error != nil }
+            ? VertexReportService.retryInterval
+            : VertexReportService.refreshInterval
         let shouldFetchVertex = lastVertexAttempt.map {
-            capturedAt.timeIntervalSince($0) >= VertexReportService.refreshInterval
+            capturedAt.timeIntervalSince($0) >= vertexInterval
         } ?? true
         if shouldFetchVertex {
             lastVertexAttempt = capturedAt
-            let vertexResult = await Task.detached(priority: .utility) {
-                do {
-                    return VertexRefreshResult.success(
-                        try VertexReportService().fetch()
-                    )
-                } catch {
-                    let message = (error as? LocalizedError)?.errorDescription
-                        ?? "Vertex report is temporarily unavailable."
-                    return VertexRefreshResult.failure(message)
+            // Each account is read independently and concurrently, so one
+            // unauthenticated project cannot blank the one that does report.
+            let vertexResults = await withTaskGroup(
+                of: VertexAccountReport.self,
+                returning: [VertexAccountReport].self
+            ) { group in
+                for account in VertexAccount.configured {
+                    group.addTask {
+                        do {
+                            return VertexAccountReport(
+                                account: account,
+                                report: try VertexReportService().fetch(
+                                    account: account
+                                ),
+                                error: nil
+                            )
+                        } catch {
+                            let message = (error as? LocalizedError)?
+                                .errorDescription
+                                ?? "Vertex report is temporarily unavailable."
+                            return VertexAccountReport(
+                                account: account,
+                                report: nil,
+                                error: message
+                            )
+                        }
+                    }
                 }
-            }.value
-            applyVertexResult(vertexResult)
+                var collected: [VertexAccountReport] = []
+                for await result in group {
+                    collected.append(result)
+                }
+                return collected
+            }
+            applyVertexResults(vertexResults)
         }
         lastUpdated = capturedAt
     }
@@ -168,18 +229,31 @@ final class DashboardModel: ObservableObject {
 
     private func applyHistoryResult(_ result: HistoryRefreshResult) {
         switch result {
-        case .success(let points):
+        case .success(let points, let codexPoints):
             let grouped = Dictionary(grouping: points, by: \.seriesID)
-            let nextSeries = AccountSlot.configured.map { slot in
-                return ChartSeries(
-                    id: slot.id,
-                    label: slot.title,
-                    unit: .percentUsed,
-                    points: grouped[slot.id] ?? []
-                )
-            }
+            let nextSeries = AccountSlot.configured
+                .filter { $0.provider == .claude }
+                .map { slot in
+                    ChartSeries(
+                        id: slot.id,
+                        label: slot.title,
+                        unit: .percentUsed,
+                        points: grouped[slot.id] ?? []
+                    )
+                }
             if historySeries != nextSeries {
                 historySeries = nextSeries
+            }
+            let nextCodex = Self.codexSlotID.map { slotID in
+                ChartSeries(
+                    id: slotID,
+                    label: "Codex",
+                    unit: .percentUsed,
+                    points: codexPoints
+                )
+            }
+            if codexSeries != nextCodex {
+                codexSeries = nextCodex
             }
             if historyError != nil {
                 historyError = nil
@@ -191,19 +265,15 @@ final class DashboardModel: ObservableObject {
         }
     }
 
-    private func applyVertexResult(_ result: VertexRefreshResult) {
-        switch result {
-        case .success(let report):
-            if vertexReport != report {
-                vertexReport = report
-            }
-            if vertexError != nil {
-                vertexError = nil
-            }
-        case .failure(let message):
-            if vertexError != message {
-                vertexError = message
-            }
+    private func applyVertexResults(_ results: [VertexAccountReport]) {
+        // Kept in configured order so the lanes below the chart do not reorder
+        // themselves as accounts finish at different speeds.
+        let ordered = VertexAccount.configured.compactMap { account in
+            results.first { $0.account == account }
+        }
+        guard !ordered.isEmpty else { return }
+        if vertexReports != ordered {
+            vertexReports = ordered
         }
     }
 
@@ -344,11 +414,7 @@ final class DashboardModel: ObservableObject {
 }
 
 private enum HistoryRefreshResult: Sendable {
-    case success([ChartPoint])
+    case success([ChartPoint], [ChartPoint])
     case failure(String)
 }
 
-private enum VertexRefreshResult: Sendable {
-    case success(VertexReport)
-    case failure(String)
-}

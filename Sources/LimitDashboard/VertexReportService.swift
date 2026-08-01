@@ -1,5 +1,77 @@
 import Foundation
 
+/// One authenticated Vertex source. Each account keeps its own gcloud config
+/// directory, so signing in to a second project cannot disturb the first: the
+/// helper reads whichever credentials `CLOUDSDK_CONFIG` points at.
+struct VertexAccount: Identifiable, Hashable, Sendable {
+    let id: String
+    let label: String
+    /// Home-relative gcloud config directory. `nil` uses the machine default.
+    let configDirectory: String?
+    /// Explicit project. `nil` uses that config's active project.
+    let project: String?
+
+    var resolvedConfigDirectory: String? {
+        configDirectory.map {
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent($0, isDirectory: true)
+                .path
+        }
+    }
+
+    /// Accounts come from `~/.config/limit-dashboard/vertex_accounts.json` when
+    /// that file exists, so a checkout of this repository names nobody's
+    /// projects. Without the file, the machine's default gcloud identity is the
+    /// one account.
+    static let configured: [VertexAccount] = loadConfigured()
+
+    static func loadConfigured(
+        from url: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                ".config/limit-dashboard/vertex_accounts.json"
+            )
+    ) -> [VertexAccount] {
+        struct Stored: Decodable {
+            let id: String
+            let label: String
+            let configDirectory: String?
+            let project: String?
+        }
+        if
+            let data = try? Data(contentsOf: url),
+            let stored = try? JSONDecoder().decode([Stored].self, from: data),
+            !stored.isEmpty
+        {
+            return stored.map {
+                VertexAccount(
+                    id: $0.id,
+                    label: $0.label,
+                    configDirectory: $0.configDirectory,
+                    project: $0.project
+                )
+            }
+        }
+        return [
+            VertexAccount(
+                id: "vertex-default",
+                label: "Personal",
+                configDirectory: nil,
+                project: nil
+            )
+        ]
+    }
+}
+
+/// A single account's outcome. A failing account reports its own reason and
+/// never removes the account that did report.
+struct VertexAccountReport: Identifiable, Equatable, Sendable {
+    let account: VertexAccount
+    let report: VertexReport?
+    let error: String?
+
+    var id: String { account.id }
+}
+
 struct VertexTokenTotals: Equatable, Sendable {
     let inputNotMarkedExplicitCache: Int64
     let explicitCacheServedInput: Int64
@@ -50,6 +122,9 @@ enum VertexReportError: LocalizedError {
 
 struct VertexReportService: Sendable {
     static let refreshInterval: TimeInterval = 15 * 60
+    /// Applied while any account is failing, so re-authenticating one is
+    /// reflected quickly instead of being hidden behind the full interval.
+    static let retryInterval: TimeInterval = 60
     static let dashboardArguments = [
         "--chart-last", "30d",
         "--chart-interval", "1d",
@@ -58,11 +133,17 @@ struct VertexReportService: Sendable {
         "--json",
     ]
 
-    func fetch() throws -> VertexReport {
+    func fetch(
+        account: VertexAccount = VertexAccount.configured[0]
+    ) throws -> VertexReport {
         let scriptURL = try scriptLocation()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [scriptURL.path] + Self.dashboardArguments
+        var arguments = [scriptURL.path] + Self.dashboardArguments
+        if let project = account.project {
+            arguments += ["--project", project]
+        }
+        process.arguments = arguments
 
         var environment = ProcessInfo.processInfo.environment
         let existingPath = environment["PATH"] ?? "/usr/bin:/bin"
@@ -73,6 +154,12 @@ struct VertexReportService: Sendable {
             "/bin",
             existingPath,
         ].joined(separator: ":")
+        // Selects this account's own gcloud credentials. The default account
+        // inherits whatever the machine already uses, so its behavior is
+        // unchanged by a second sign-in.
+        if let configDirectory = account.resolvedConfigDirectory {
+            environment["CLOUDSDK_CONFIG"] = configDirectory
+        }
         process.environment = environment
 
         let standardOutput = Pipe()

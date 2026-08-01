@@ -34,7 +34,7 @@ Last 30 days, one-day chart buckets, grouped by model, with the matching
 
 ```sh
 python3 scripts/vertex_ai_report.py \
-  --project freudche \
+  --project personal-project \
   --chart-last 30d \
   --chart-interval 1d \
   --summary-last 30d \
@@ -45,7 +45,7 @@ Last 8 hours in 20-minute chart buckets plus the default 30-day summary:
 
 ```sh
 python3 scripts/vertex_ai_report.py \
-  --project freudche \
+  --project personal-project \
   --chart-last 8h \
   --chart-interval 20m \
   --summary-last 30d
@@ -55,7 +55,7 @@ Arbitrary, different explicit chart and summary date windows:
 
 ```sh
 python3 scripts/vertex_ai_report.py \
-  --project freudche \
+  --project personal-project \
   --chart-start 2026-07-27 \
   --chart-end 2026-07-29 \
   --chart-interval 1h \
@@ -69,7 +69,7 @@ Explicit chart timestamps with a relative summary:
 
 ```sh
 python3 scripts/vertex_ai_report.py \
-  --project freudche \
+  --project personal-project \
   --chart-start 2026-07-27T09:10:00+02:00 \
   --chart-end 2026-07-27T17:10:00+02:00 \
   --chart-interval 20m \
@@ -153,7 +153,7 @@ enable billing export, or change a cloud setting.
 ### Run
 
 ```sh
-cd /Users/reza/work/limit-dashboard
+cd ~/work/limit-dashboard
 python3 scripts/vertex_ai_spend.py --diagnose-only
 python3 scripts/vertex_ai_spend.py
 ```
@@ -182,10 +182,10 @@ python3 scripts/vertex_ai_spend.py --maximum-bytes-billed 536870912
 
 Verified 2026-07-28:
 
-- Active identity: `mrez9090@gmail.com`
-- Active project: `freudche`
+- Active identity: `account-1@…`
+- Active project: `personal-project`
 - Billing: enabled
-- Accessible billing dataset: `freudche.billing_export` in `EU`
+- Accessible billing dataset: `personal-project.billing_export` in `EU`
 - Export tables in that dataset: none
 
 The dataset description says it is intended for the standard Cloud Billing

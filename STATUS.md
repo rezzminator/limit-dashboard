@@ -40,10 +40,10 @@ account percentages:
 
 | Account | Dashboard source | Result |
 |---|---|---|
-| Claude Account 1 — `mrez9090@gmail.com` | Claude usage endpoint through curl_cffi; slot-1 local snapshot fallback | **Live**: non-empty provider quota windows, all Used values within 0–100. |
-| Claude Account 2 — `reza.khosravivala@gmail.com` | Claude usage endpoint through curl_cffi; identity-matched slot-2 local fallback | **Live**: non-empty provider quota windows, all Used values within 0–100 while no status-line session was required. |
-| Claude Account 3 — `reza@intuita.health` | Claude usage endpoint through curl_cffi; identity-matched slot-3 local fallback | **Live**: non-empty provider quota windows, all Used values within 0–100 while no status-line session was required. |
-| Codex — `mrez9090@gmail.com` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: non-empty provider quota windows. |
+| Claude Account 1 — `account-1@…` | Claude usage endpoint through curl_cffi; slot-1 local snapshot fallback | **Live**: non-empty provider quota windows, all Used values within 0–100. |
+| Claude Account 2 — `account-2@…` | Claude usage endpoint through curl_cffi; identity-matched slot-2 local fallback | **Live**: non-empty provider quota windows, all Used values within 0–100 while no status-line session was required. |
+| Claude Account 3 — `account-3@…` | Claude usage endpoint through curl_cffi; identity-matched slot-3 local fallback | **Live**: non-empty provider quota windows, all Used values within 0–100 while no status-line session was required. |
+| Codex — `account-1@…` | `~/.codex/auth.json` plus the Codex usage endpoint | **Live**: non-empty provider quota windows. |
 
 If a live provider request fails, an aged reading is still shown rather than
 hidden because usage inside one reset window never decreases: an old observation
@@ -368,9 +368,9 @@ Accessibility inspection after opening and after an automatic refresh returned
 
 ## Vertex AI spend diagnostic
 
-- Active Google Cloud project: `freudche`
+- Active Google Cloud project: `personal-project`
 - Cloud Billing: enabled
-- Accessible dataset: `freudche.billing_export` (`EU`)
+- Accessible dataset: `personal-project.billing_export` (`EU`)
 - `INFORMATION_SCHEMA.TABLES`: empty
 - Actual 30-day Vertex AI spend: unavailable because there is no queryable
   Cloud Billing export table
@@ -383,7 +383,7 @@ Reusable diagnostic/report script: `scripts/vertex_ai_spend.py`. Instructions:
 ## Vertex AI Monitoring and estimate validation
 
 The new `scripts/vertex_ai_report.py` was validated against the read-only Cloud
-Monitoring API for project `freudche`.
+Monitoring API for project `personal-project`.
 
 - 30-day summary: 132,247,169 input tokens not marked explicit-cache,
   28,859,150 output tokens, 161,106,319 total. Explicit-cache-served input was
