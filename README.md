@@ -7,6 +7,8 @@
 
 **One quiet, native macOS window for every AI subscription limit you have.**
 
+![Limit Dashboard — native macOS app showing Claude usage limits and reset countdowns for three accounts, OpenAI Codex weekly quota history, and Google Vertex AI token usage with estimated spend, all on one dark dashboard](assets/dashboard.png)
+
 Limit Dashboard is a local-only SwiftUI app that tracks, on one screen:
 
 - **Claude** (claude.ai / Claude Code) usage limits — the 5-hour, 7-day, and
