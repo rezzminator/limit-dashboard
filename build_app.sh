@@ -59,3 +59,13 @@ else
 fi
 
 echo "Built: $APP_PATH"
+
+# An installed copy that lags behind the build is two different apps answering
+# one name — Dock and Spotlight launch the installed one, so every fix looks
+# like it never shipped. Keep it identical to what was just built and signed.
+INSTALLED="/Applications/Limit Dashboard.app"
+if [ -d "$INSTALLED" ] && [ "$INSTALLED" != "$APP_PATH" ]; then
+    rm -rf "$INSTALLED"
+    ditto "$APP_PATH" "$INSTALLED"
+    echo "Installed: $INSTALLED"
+fi
