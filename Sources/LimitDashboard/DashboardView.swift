@@ -1146,7 +1146,7 @@ private struct CodexPanel: View, Equatable {
                             .fill(accent)
                             .frame(
                                 width: proxy.size.width
-                                    * window.normalizedUsedPercent / 100
+                                    * window.remainingPercent / 100
                             )
                     }
                 }
@@ -1634,7 +1634,7 @@ private struct CompactLimitRow: View {
                         .fill(accent)
                         .frame(
                             width: proxy.size.width
-                                * window.normalizedUsedPercent / 100
+                                * window.remainingPercent / 100
                         )
                 }
             }
@@ -1711,7 +1711,7 @@ private struct CompactFableRow: View {
                             .fill(accent)
                             .frame(
                                 width: proxy.size.width
-                                    * window.normalizedUsedPercent / 100
+                                    * window.remainingPercent / 100
                             )
                     }
                 }
@@ -1791,7 +1791,7 @@ private struct LimitRow: View {
                                 endPoint: .trailing
                             )
                         )
-                        .frame(width: proxy.size.width * window.normalizedUsedPercent / 100)
+                        .frame(width: proxy.size.width * window.remainingPercent / 100)
                 }
             }
             .frame(height: 7)
@@ -1831,7 +1831,7 @@ private struct FableUsageRow: View {
                                     endPoint: .trailing
                                 )
                             )
-                            .frame(width: proxy.size.width * window.normalizedUsedPercent / 100)
+                            .frame(width: proxy.size.width * window.remainingPercent / 100)
                     }
                 }
                 .frame(height: 7)

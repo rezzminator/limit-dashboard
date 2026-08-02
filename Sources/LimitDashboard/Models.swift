@@ -93,6 +93,11 @@ struct UsageWindow: Identifiable, Hashable, Sendable {
         max(0, min(100, usedPercent))
     }
 
+    /// What is still available in the window. Every bar in the dashboard is
+    /// drawn from this, not from the used share: a quota reads like a tank, so
+    /// the bar starts full on a fresh window and drains towards empty as it is
+    /// spent. Filling by used-% would have shown an empty bar for the state
+    /// with the most headroom.
     var remainingPercent: Double {
         100 - normalizedUsedPercent
     }

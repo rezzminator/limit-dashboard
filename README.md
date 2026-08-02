@@ -252,8 +252,9 @@ in local cache**.
 
 Each card's large headline is **Remaining**, consistently for Claude and Codex.
 Every quota row also labels the provider's raw `utilization`/`percent` as
-**Used** and calculates **Remaining** separately. Progress bars represent Used,
-matching the provider's field.
+**Used** and calculates **Remaining** separately. Progress bars represent
+**Remaining**: a bar is full on a fresh window and drains towards empty as the
+quota is spent, so the amount of colour always reads as headroom left.
 
 Anthropic documents Fable as a model-specific allowance drawn from weekly plan
 usage:
