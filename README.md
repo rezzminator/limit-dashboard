@@ -1,5 +1,10 @@
 # Limit Dashboard
 
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue)
+![Swift 6](https://img.shields.io/badge/Swift-6-orange)
+![SwiftUI](https://img.shields.io/badge/UI-SwiftUI-purple)
+![License: MIT](https://img.shields.io/badge/License-MIT-green)
+
 **One quiet, native macOS window for every AI subscription limit you have.**
 
 Limit Dashboard is a local-only SwiftUI app that tracks, on one screen:
