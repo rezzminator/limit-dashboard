@@ -6,11 +6,13 @@ struct DashboardView: View {
     @ObservedObject var model: DashboardModel
     @AppStorage("refreshIntervalSeconds") private var refreshIntervalSeconds =
         RefreshPolicy.defaultSeconds
-    // The panels below declare fixed minimum heights, so the window has to be
-    // tall enough to hold their sum plus spacing and padding. When it was not,
-    // SwiftUI compressed the stack and clipped the header title.
-    @ScaledMetric(relativeTo: .body) private var minimumDashboardHeight: CGFloat =
-        1_228
+    // The panels declare fixed minimum heights, and the window used to enforce
+    // their sum as its own minimum height so SwiftUI could not compress the
+    // stack and clip the header. That made the dashboard impossible to shrink
+    // below its own layout, so on a display that could not fit it the lower
+    // cards were simply unreachable. The stack now keeps its natural height
+    // inside a scroll view, which cannot squeeze it, and the window is free to
+    // be any size.
 
     private var validatedInterval: Int {
         RefreshPolicy.validated(refreshIntervalSeconds)
@@ -27,64 +29,30 @@ struct DashboardView: View {
         ZStack {
             DashboardBackground()
 
-            VStack(alignment: .leading, spacing: 10) {
-                header
-
-                if let issue = model.issueSummary {
-                    IssueBanner(text: issue)
-                }
-
-                HistoryChart(
-                    series: model.historySeries,
-                    error: model.historyError
-                )
-                .equatable()
-
-                CodexPanel(
-                    snapshot: model.codexSnapshot,
-                    series: model.codexSeries
-                )
-                .equatable()
-
-                VertexCard(accounts: model.vertexReports)
-                    .equatable()
-
-                let claudeCards = model.claudeSnapshots
-                Grid(horizontalSpacing: 10, verticalSpacing: 10) {
-                    ForEach(
-                        Array(stride(from: 0, to: claudeCards.count, by: 2)),
-                        id: \.self
-                    ) { first in
-                        GridRow(alignment: .top) {
-                            if claudeCards.indices.contains(first + 1) {
-                                AccountCard(snapshot: claudeCards[first])
-                                    .equatable()
-                                AccountCard(snapshot: claudeCards[first + 1])
-                                    .equatable()
-                            } else {
-                                // An odd final card claims the whole row rather
-                                // than leaving a hole beside it.
-                                AccountCard(snapshot: claudeCards[first])
-                                    .equatable()
-                                    .gridCellColumns(2)
-                            }
-                        }
-                    }
-                }
-
-                Spacer(minLength: 12)
-
+            ScrollView(.vertical) {
+                content
+            }
+            // A window taller than the dashboard should not rubber-band against
+            // empty space; the scroll only engages once there is something below
+            // the fold.
+            .scrollBounceBehavior(.basedOnSize)
+            // The footer is anchored to the window rather than placed at the end
+            // of the scrolling content: it reports when the data was last
+            // checked, which is worth reading from anywhere in the list. Keeping
+            // it out of the scroll view also keeps a greedy Spacer out of an
+            // unbounded axis — inside one, it grows without limit and the window
+            // can no longer derive a size at all.
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 footer
             }
-            .padding(14)
-            .frame(
-                maxWidth: .infinity,
-                maxHeight: .infinity,
-                alignment: .topLeading
-            )
         }
-        .frame(minWidth: 920, minHeight: minimumDashboardHeight)
-        .background(WindowFocusResetter())
+        .frame(minWidth: 920, minHeight: 420)
+        .background(
+            WindowFocusResetter(
+                minimumContentSize: CGSize(width: 920, height: 420),
+                recoveryContentSize: CGSize(width: 1_060, height: 1_000)
+            )
+        )
         .onAppear {
             refreshIntervalSeconds = validatedInterval
         }
@@ -100,6 +68,57 @@ struct DashboardView: View {
                 await model.refresh()
             }
         }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+
+            if let issue = model.issueSummary {
+                IssueBanner(text: issue)
+            }
+
+            HistoryChart(
+                series: model.historySeries,
+                error: model.historyError
+            )
+            .equatable()
+
+            CodexPanel(
+                snapshot: model.codexSnapshot,
+                series: model.codexSeries
+            )
+            .equatable()
+
+            VertexCard(accounts: model.vertexReports)
+                .equatable()
+
+            let claudeCards = model.claudeSnapshots
+            Grid(horizontalSpacing: 10, verticalSpacing: 10) {
+                ForEach(
+                    Array(stride(from: 0, to: claudeCards.count, by: 2)),
+                    id: \.self
+                ) { first in
+                    GridRow(alignment: .top) {
+                        if claudeCards.indices.contains(first + 1) {
+                            AccountCard(snapshot: claudeCards[first])
+                                .equatable()
+                            AccountCard(snapshot: claudeCards[first + 1])
+                                .equatable()
+                        } else {
+                            // An odd final card claims the whole row rather
+                            // than leaving a hole beside it.
+                            AccountCard(snapshot: claudeCards[first])
+                                .equatable()
+                                .gridCellColumns(2)
+                        }
+                    }
+                }
+            }
+
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private var header: some View {
@@ -179,7 +198,18 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 11)
+        // Cards scroll underneath this bar, so it carries its own surface and a
+        // hairline; without them the text would sit on top of a moving panel.
+        .background(alignment: .top) {
+            ZStack(alignment: .top) {
+                Rectangle().fill(.ultraThinMaterial)
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+            }
+        }
     }
 }
 
@@ -379,7 +409,7 @@ private struct HistoryChart: View, Equatable {
                                 .foregroundStyle(.orange)
                         } else if let firstMeasurement {
                             Text(
-                                "Saved remaining-% snapshots · not token activity · begins \(firstMeasurement, style: .time)"
+                                "Saved used-% snapshots · not token activity · begins \(firstMeasurement, style: .time)"
                             )
                             .font(.callout.weight(.medium))
                             .foregroundStyle(.secondary)
@@ -394,7 +424,7 @@ private struct HistoryChart: View, Equatable {
                 historyLegend
             }
 
-            Text("CLAUDE 5-HOUR WINDOW QUOTA REMAINING · 24H")
+            Text("CLAUDE 5-HOUR WINDOW QUOTA USED · 24H")
                 .font(.caption2.weight(.heavy))
                 .tracking(0.6)
                 .foregroundStyle(.secondary)
@@ -405,7 +435,7 @@ private struct HistoryChart: View, Equatable {
                         ForEach(account.points) { point in
                             LineMark(
                                 x: .value("Time", point.timestamp),
-                                y: .value("Quota remaining", point.value),
+                                y: .value("Quota used", point.value),
                                 series: .value("Account", account.id)
                             )
                             .foregroundStyle(color(for: account.id))
@@ -414,7 +444,7 @@ private struct HistoryChart: View, Equatable {
 
                             PointMark(
                                 x: .value("Time", point.timestamp),
-                                y: .value("Quota remaining", point.value)
+                                y: .value("Quota used", point.value)
                             )
                             .foregroundStyle(color(for: account.id))
                             .symbolSize(18)
@@ -978,14 +1008,14 @@ private struct CodexPanel: View, Equatable {
                         Circle()
                             .fill(accent)
                             .frame(width: 6, height: 6)
-                        Text("Saved remaining-% snapshots · \(spanLabel)")
+                        Text("Saved used-% snapshots · \(spanLabel)")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 Text(
-                    "WEEKLY WINDOW QUOTA REMAINING · \(spanLabel) OF HISTORY · AXIS FITTED TO READINGS"
+                    "WEEKLY WINDOW QUOTA USED · \(spanLabel) OF HISTORY · AXIS FITTED TO READINGS"
                 )
                     .font(.caption2.weight(.heavy))
                     .tracking(0.6)
@@ -1004,7 +1034,7 @@ private struct CodexPanel: View, Equatable {
                     Chart(points) { point in
                         AreaMark(
                             x: .value("Time", point.timestamp),
-                            y: .value("Quota remaining", point.value)
+                            y: .value("Quota used", point.value)
                         )
                         .foregroundStyle(
                             LinearGradient(
@@ -1020,7 +1050,7 @@ private struct CodexPanel: View, Equatable {
 
                         LineMark(
                             x: .value("Time", point.timestamp),
-                            y: .value("Quota remaining", point.value)
+                            y: .value("Quota used", point.value)
                         )
                         .foregroundStyle(accent)
                         .lineStyle(.init(lineWidth: 2.2, lineCap: .round))
@@ -1437,20 +1467,56 @@ private struct RefreshIntervalControl: View {
     }
 }
 
+/// Clears the initial focus ring and holds the window to a usable size.
+///
+/// The size half is not decoration. Once the dashboard scrolls, SwiftUI has no
+/// intrinsic height to derive a window minimum from — a scroll view is happy at
+/// any size — and `.frame(minWidth:minHeight:)` did not reach the window: it
+/// opened at 131×109, mostly off the left edge of the screen, with no way to
+/// grab it. AppKit is told the floor directly, and any frame already smaller
+/// than that (including one persisted from a previous launch) is restored.
 private struct WindowFocusResetter: NSViewRepresentable {
+    let minimumContentSize: CGSize
+    let recoveryContentSize: CGSize
+
     func makeNSView(context: Context) -> NSView {
-        FocusClearingView()
+        WindowConfiguringView(
+            minimumContentSize: minimumContentSize,
+            recoveryContentSize: recoveryContentSize
+        )
     }
 
     func updateNSView(_ nsView: NSView, context: Context) { }
 
-    private final class FocusClearingView: NSView {
-        private var clearedInitialFocus = false
+    private final class WindowConfiguringView: NSView {
+        private let minimumContentSize: CGSize
+        private let recoveryContentSize: CGSize
+        private var configuredWindow = false
+
+        init(minimumContentSize: CGSize, recoveryContentSize: CGSize) {
+            self.minimumContentSize = minimumContentSize
+            self.recoveryContentSize = recoveryContentSize
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is not used")
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            guard window != nil, !clearedInitialFocus else { return }
-            clearedInitialFocus = true
+            guard let window, !configuredWindow else { return }
+            configuredWindow = true
+
+            window.contentMinSize = minimumContentSize
+            let content = window.contentRect(forFrameRect: window.frame).size
+            if content.width < minimumContentSize.width
+                || content.height < minimumContentSize.height {
+                window.setContentSize(recoveryContentSize)
+                window.center()
+            }
+
             DispatchQueue.main.async { [weak self] in
                 self?.window?.makeFirstResponder(nil)
             }

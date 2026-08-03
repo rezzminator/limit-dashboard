@@ -15,7 +15,7 @@ final class DashboardModel: ObservableObject {
                 ChartSeries(
                     id: $0.id,
                     label: $0.title,
-                    unit: .percentRemaining,
+                    unit: .percentUsed,
                     points: []
                 )
             }
@@ -154,13 +154,13 @@ final class DashboardModel: ObservableObject {
         ) { [historyStore, finalizedResults, capturedAt, codexSlotID] in
             do {
                 try historyStore.record(finalizedResults, at: capturedAt)
-                let points = try historyStore.loadPrimaryRemainingPoints(
+                let points = try historyStore.loadPrimaryUsedPoints(
                     since: capturedAt.addingTimeInterval(-HistoryStore.chartWindow)
                 )
                 // Codex is read over its own weekly period so its climb and its
                 // reset are visible rather than flattened into 24 hours.
                 let codexPoints = try codexSlotID.map { slotID in
-                    try historyStore.loadPrimaryRemainingPoints(
+                    try historyStore.loadPrimaryUsedPoints(
                         since: capturedAt.addingTimeInterval(
                             -HistoryStore.codexChartWindow
                         ),
@@ -250,7 +250,7 @@ final class DashboardModel: ObservableObject {
                     ChartSeries(
                         id: slot.id,
                         label: slot.title,
-                        unit: .percentRemaining,
+                        unit: .percentUsed,
                         points: grouped[slot.id] ?? []
                     )
                 }
@@ -261,7 +261,7 @@ final class DashboardModel: ObservableObject {
                 ChartSeries(
                     id: slotID,
                     label: "Codex",
-                    unit: .percentRemaining,
+                    unit: .percentUsed,
                     points: codexPoints
                 )
             }
