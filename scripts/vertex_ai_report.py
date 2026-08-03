@@ -247,6 +247,35 @@ def rfc3339(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def login_command() -> str:
+    """The exact command that re-authorises *this* report's credentials.
+
+    Each account is a separate `CLOUDSDK_CONFIG` directory, so a bare
+    `gcloud auth login` signs the wrong one in when several are configured.
+    The home directory is abbreviated because this string is shown on screen.
+    """
+    config = os.environ.get("CLOUDSDK_CONFIG")
+    if not config:
+        return "gcloud auth login"
+    home = os.path.expanduser("~")
+    if config == home or config.startswith(home + os.sep):
+        config = "~" + config[len(home):]
+    return f"CLOUDSDK_CONFIG={config} gcloud auth login"
+
+
+def auth_failure_reason(error: Exception) -> str:
+    """Names the failure without echoing gcloud's output.
+
+    An organisation that enforces periodic reauthentication produces a session
+    that still lists an account and still fails every token request, which
+    reads as a broken app rather than an expired sign-in unless it is said.
+    """
+    stderr = getattr(error, "stderr", "") or ""
+    if "eauthentication" in stderr:
+        return "gcloud requires reauthentication for this account."
+    return "Existing gcloud authentication was unavailable."
+
+
 def access_token() -> str:
     try:
         process = subprocess.run(
@@ -260,7 +289,7 @@ def access_token() -> str:
         raise ReportError("gcloud was not found.") from error
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         raise ReportError(
-            "Existing gcloud authentication was unavailable. Run gcloud auth login."
+            f"{auth_failure_reason(error)} Run: {login_command()}"
         ) from error
     token = process.stdout.strip()
     if not token:

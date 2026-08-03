@@ -379,7 +379,7 @@ private struct HistoryChart: View, Equatable {
                                 .foregroundStyle(.orange)
                         } else if let firstMeasurement {
                             Text(
-                                "Saved used-% snapshots · not token activity · begins \(firstMeasurement, style: .time)"
+                                "Saved remaining-% snapshots · not token activity · begins \(firstMeasurement, style: .time)"
                             )
                             .font(.callout.weight(.medium))
                             .foregroundStyle(.secondary)
@@ -394,7 +394,7 @@ private struct HistoryChart: View, Equatable {
                 historyLegend
             }
 
-            Text("CLAUDE 5-HOUR WINDOW QUOTA USED · 24H")
+            Text("CLAUDE 5-HOUR WINDOW QUOTA REMAINING · 24H")
                 .font(.caption2.weight(.heavy))
                 .tracking(0.6)
                 .foregroundStyle(.secondary)
@@ -405,7 +405,7 @@ private struct HistoryChart: View, Equatable {
                         ForEach(account.points) { point in
                             LineMark(
                                 x: .value("Time", point.timestamp),
-                                y: .value("Quota used", point.value),
+                                y: .value("Quota remaining", point.value),
                                 series: .value("Account", account.id)
                             )
                             .foregroundStyle(color(for: account.id))
@@ -414,7 +414,7 @@ private struct HistoryChart: View, Equatable {
 
                             PointMark(
                                 x: .value("Time", point.timestamp),
-                                y: .value("Quota used", point.value)
+                                y: .value("Quota remaining", point.value)
                             )
                             .foregroundStyle(color(for: account.id))
                             .symbolSize(18)
@@ -978,14 +978,14 @@ private struct CodexPanel: View, Equatable {
                         Circle()
                             .fill(accent)
                             .frame(width: 6, height: 6)
-                        Text("Saved used-% snapshots · \(spanLabel)")
+                        Text("Saved remaining-% snapshots · \(spanLabel)")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 Text(
-                    "WEEKLY WINDOW QUOTA USED · \(spanLabel) OF HISTORY · AXIS FITTED TO READINGS"
+                    "WEEKLY WINDOW QUOTA REMAINING · \(spanLabel) OF HISTORY · AXIS FITTED TO READINGS"
                 )
                     .font(.caption2.weight(.heavy))
                     .tracking(0.6)
@@ -1004,7 +1004,7 @@ private struct CodexPanel: View, Equatable {
                     Chart(points) { point in
                         AreaMark(
                             x: .value("Time", point.timestamp),
-                            y: .value("Quota used", point.value)
+                            y: .value("Quota remaining", point.value)
                         )
                         .foregroundStyle(
                             LinearGradient(
@@ -1020,7 +1020,7 @@ private struct CodexPanel: View, Equatable {
 
                         LineMark(
                             x: .value("Time", point.timestamp),
-                            y: .value("Quota used", point.value)
+                            y: .value("Quota remaining", point.value)
                         )
                         .foregroundStyle(accent)
                         .lineStyle(.init(lineWidth: 2.2, lineCap: .round))
@@ -1132,7 +1132,7 @@ private struct CodexPanel: View, Equatable {
                                 weight: .bold
                             )
                         )
-                    Text("remaining · \(window.usedLabel)")
+                    Text("remaining")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -1230,34 +1230,10 @@ private struct AccountCard: View, Equatable {
 
                 Spacer()
 
-                if let headlineWindow,
-                   snapshot.canDisplayQuotaValues {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        HStack(alignment: .firstTextBaseline, spacing: 4) {
-                            Text(
-                                "\(Int(headlineWindow.remainingPercent.rounded()))%"
-                            )
-                            .font(
-                                .system(
-                                    .title,
-                                    design: .rounded,
-                                    weight: .bold
-                                )
-                            )
-                            Text("remaining")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        // Names the window the headline came from. A card whose
-                        // shortest window has reset falls through to the next
-                        // one, and an unlabelled percentage would then be read
-                        // as the 5-hour figure on a card showing its 7-day.
-                        Text("\(headlineWindow.title) · \(headlineWindow.usedLabel)")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
+                // No headline percentage here. Every window this card holds is
+                // already listed below with its own figure, and lifting one of
+                // them into the header restated a number the reader can see —
+                // while implying the card had a single overall percentage.
                 StateBadge(state: snapshot.state)
             }
 
@@ -1640,7 +1616,7 @@ private struct CompactLimitRow: View {
             }
             .frame(height: 5)
             VStack(alignment: .trailing, spacing: 0) {
-                Text("\(window.usedLabel) · \(window.remainingLabel)")
+                Text(window.remainingLabel)
                     .font(.system(.caption, design: .rounded, weight: .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
@@ -1717,7 +1693,7 @@ private struct CompactFableRow: View {
                 }
                 .frame(height: 5)
                 VStack(alignment: .trailing, spacing: 0) {
-                    Text("\(window.usedLabel) · \(window.remainingLabel)")
+                    Text(window.remainingLabel)
                         .font(.system(.caption, design: .rounded, weight: .bold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
@@ -1776,7 +1752,7 @@ private struct LimitRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(window.usedLabel) · \(window.remainingLabel)")
+                Text(window.remainingLabel)
                     .font(.system(size: 11, weight: .bold, design: .rounded))
             }
             GeometryReader { proxy in
@@ -1812,7 +1788,7 @@ private struct FableUsageRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(window.map { "\($0.usedLabel) · \($0.remainingLabel)" }
+                Text(window.map(\.remainingLabel)
                      ?? "Unavailable in local cache")
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(window == nil ? .orange : .primary)

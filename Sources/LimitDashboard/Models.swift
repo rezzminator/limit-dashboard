@@ -102,10 +102,9 @@ struct UsageWindow: Identifiable, Hashable, Sendable {
         100 - normalizedUsedPercent
     }
 
-    var usedLabel: String {
-        "\(Int(normalizedUsedPercent.rounded()))% used"
-    }
-
+    /// The only quota figure the dashboard renders. Providers report usage as a
+    /// spent share, but showing both halves of the same fact put two numbers on
+    /// every row that had to be read against each other; the app states one.
     var remainingLabel: String {
         "\(Int(remainingPercent.rounded()))% remaining"
     }

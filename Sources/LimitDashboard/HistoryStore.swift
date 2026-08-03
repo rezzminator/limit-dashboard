@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 enum ChartUnit: String, Hashable, Sendable {
-    case percentUsed
+    case percentRemaining
     case tokens
 }
 
@@ -173,10 +173,15 @@ struct HistoryStore: Sendable {
         }
     }
 
-    /// Loads saved primary-window readings. `slotID` limits the result to one
-    /// account, which lets a provider whose window length differs be charted on
-    /// its own time and value scale instead of being flattened onto a shared one.
-    func loadPrimaryUsedPoints(
+    /// Loads saved primary-window readings as **remaining** percent, matching
+    /// every other number on screen: the dashboard states quota as what is left,
+    /// never as what was spent. Both columns are recorded, so this reads history
+    /// written before the change without any migration.
+    ///
+    /// `slotID` limits the result to one account, which lets a provider whose
+    /// window length differs be charted on its own time and value scale instead
+    /// of being flattened onto a shared one.
+    func loadPrimaryRemainingPoints(
         since start: Date,
         bucketSeconds: Int = Self.chartBucketSeconds,
         slotID: String? = nil
@@ -188,7 +193,7 @@ struct HistoryStore: Sendable {
                     slot_id,
                     CAST(captured_at / ? AS INTEGER) * ? AS bucket_key,
                     MIN(captured_at) AS first_measurement,
-                    AVG(used_percent)
+                    AVG(remaining_percent)
                 FROM quota_snapshots
                 WHERE is_primary = 1 AND captured_at >= ?
                     AND (?4 IS NULL OR slot_id = ?4)

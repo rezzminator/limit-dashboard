@@ -15,7 +15,7 @@ final class DashboardModel: ObservableObject {
                 ChartSeries(
                     id: $0.id,
                     label: $0.title,
-                    unit: .percentUsed,
+                    unit: .percentRemaining,
                     points: []
                 )
             }
@@ -51,7 +51,15 @@ final class DashboardModel: ObservableObject {
         let unavailableQuota = snapshots.filter { $0.state == .quotaUnavailable }.count
         let stale = snapshots.filter { $0.state == .stale }.count
         let hasDuplicateGroup = snapshots.contains { $0.duplicatePeer != nil }
-        return unavailable + unavailableQuota + stale + (hasDuplicateGroup ? 1 : 0)
+        return unavailable + unavailableQuota + stale + failedVertexAccounts
+            + (hasDuplicateGroup ? 1 : 0)
+    }
+
+    /// A Vertex account whose report could not be produced. The count covered
+    /// only the session slots, so an account that had stopped reporting left the
+    /// header reading zero issues while its own lane showed an error.
+    private var failedVertexAccounts: Int {
+        vertexReports.filter { $0.error != nil }.count
     }
 
     // The banner explains every condition the header counts, so a non-zero
@@ -78,6 +86,11 @@ final class DashboardModel: ObservableObject {
         }
         if duplicates > 0 {
             parts.append("duplicate Claude session detected")
+        }
+        if failedVertexAccounts > 0 {
+            parts.append(
+                "\(failedVertexAccounts) Vertex account\(failedVertexAccounts == 1 ? "" : "s") not reporting"
+            )
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -141,13 +154,13 @@ final class DashboardModel: ObservableObject {
         ) { [historyStore, finalizedResults, capturedAt, codexSlotID] in
             do {
                 try historyStore.record(finalizedResults, at: capturedAt)
-                let points = try historyStore.loadPrimaryUsedPoints(
+                let points = try historyStore.loadPrimaryRemainingPoints(
                     since: capturedAt.addingTimeInterval(-HistoryStore.chartWindow)
                 )
                 // Codex is read over its own weekly period so its climb and its
                 // reset are visible rather than flattened into 24 hours.
                 let codexPoints = try codexSlotID.map { slotID in
-                    try historyStore.loadPrimaryUsedPoints(
+                    try historyStore.loadPrimaryRemainingPoints(
                         since: capturedAt.addingTimeInterval(
                             -HistoryStore.codexChartWindow
                         ),
@@ -237,7 +250,7 @@ final class DashboardModel: ObservableObject {
                     ChartSeries(
                         id: slot.id,
                         label: slot.title,
-                        unit: .percentUsed,
+                        unit: .percentRemaining,
                         points: grouped[slot.id] ?? []
                     )
                 }
@@ -248,7 +261,7 @@ final class DashboardModel: ObservableObject {
                 ChartSeries(
                     id: slotID,
                     label: "Codex",
-                    unit: .percentUsed,
+                    unit: .percentRemaining,
                     points: codexPoints
                 )
             }

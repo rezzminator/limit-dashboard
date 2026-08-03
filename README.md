@@ -58,22 +58,22 @@ inventing a time.
 
 The dashboard keeps unlike measurements in two separate chart boxes:
 
-- **Quota window state** plots saved primary-window **Used quota percentages**
-  over 24 hours. Claude uses its 5-hour window; Codex uses its primary weekly
-  window. These are quota-state snapshots, not token counts or activity
-  inferred between refreshes.
+- **Quota window state** plots saved primary-window **Remaining quota
+  percentages** over 24 hours. Claude uses its 5-hour window; Codex uses its
+  primary weekly window. These are quota-state snapshots, not token counts or
+  activity inferred between refreshes.
 - **Vertex AI token usage** plots actual Cloud Monitoring token **sum totals**
   over the last 30 days in one-day buckets, on its own token axis. A visible
   zero line and explanatory status are shown when the provider reports no
   tokens in the window; zero usage is not treated as an error.
 
 The quota x-axis is always the full 24-hour range. Only actual SQLite
-measurements are plotted from the stored `used_percent` column: the app does
-not synthesize, backfill, invert Remaining, or carry a value backward before
-its first saved snapshot. Five-minute groups use the timestamp of their first
-real measurement, so a newly created history database leaves the earlier part
-of the chart blank. An idle primary window stored as 0% Used stays at zero; its
-100% Remaining counterpart is never plotted as activity.
+measurements are plotted, from the stored `remaining_percent` column: the app
+does not synthesize, backfill, or carry a value backward before its first saved
+snapshot. Five-minute groups use the timestamp of their first real measurement,
+so a newly created history database leaves the earlier part of the chart blank.
+Both percentages are recorded for every sample, so the chart reads history
+written before it began plotting Remaining without any migration.
 
 The Vertex chart is fetched from Cloud Monitoring and is not persisted in the
 quota SQLite database. The two charts do not normalize or equate quota
@@ -250,11 +250,13 @@ The app does not substitute paid/Extra usage data or infer a Fable value. If
 that exact entry is absent or has no numeric `percent`, it shows **Unavailable
 in local cache**.
 
-Each card's large headline is **Remaining**, consistently for Claude and Codex.
-Every quota row also labels the provider's raw `utilization`/`percent` as
-**Used** and calculates **Remaining** separately. Progress bars represent
-**Remaining**: a bar is full on a fresh window and drains towards empty as the
-quota is spent, so the amount of colour always reads as headroom left.
+The dashboard states quota one way only: as **Remaining**. Providers report the
+spent share, which the app converts once and then never shows — printing both
+halves of the same fact put two numbers on every row that had to be read
+against each other. Each quota row carries a single percentage, and no card
+repeats one of its rows as a headline. Progress bars represent Remaining too: a
+bar is full on a fresh window and drains towards empty as the quota is spent,
+so the amount of colour always reads as headroom left.
 
 Anthropic documents Fable as a model-specific allowance drawn from weekly plan
 usage:

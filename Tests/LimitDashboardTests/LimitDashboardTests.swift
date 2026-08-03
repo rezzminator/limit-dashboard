@@ -38,7 +38,6 @@ final class LimitDashboardTests: XCTestCase {
             usedPercent: 73,
             resetAt: nil
         )
-        XCTAssertEqual(observed.usedLabel, "73% used")
         XCTAssertEqual(observed.remainingLabel, "27% remaining")
         XCTAssertEqual(observed.normalizedUsedPercent, 73)
     }
@@ -725,7 +724,7 @@ final class LimitDashboardTests: XCTestCase {
             at: recent.addingTimeInterval(60)
         )
 
-        let points = try store.loadPrimaryUsedPoints(
+        let points = try store.loadPrimaryRemainingPoints(
             since: old.addingTimeInterval(-1)
         )
         XCTAssertEqual(
@@ -733,10 +732,10 @@ final class LimitDashboardTests: XCTestCase {
             2,
             "Falling back to an older source must not delete newer measurements that really happened."
         )
-        XCTAssertEqual(points.map(\.value).sorted(), [20, 55])
+        XCTAssertEqual(points.map(\.value).sorted(), [45, 80])
     }
 
-    func testHistoryStoreAggregatesPrimaryUsedValuesWithoutIdentityData() throws {
+    func testHistoryStoreAggregatesPrimaryRemainingValuesWithoutIdentityData() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "limit-dashboard-history-\(UUID().uuidString)",
             isDirectory: true
@@ -791,7 +790,7 @@ final class LimitDashboardTests: XCTestCase {
             ],
             at: start.addingTimeInterval(60)
         )
-        let points = try store.loadPrimaryUsedPoints(
+        let points = try store.loadPrimaryRemainingPoints(
             since: start.addingTimeInterval(-1),
             bucketSeconds: 300
         )
@@ -803,7 +802,7 @@ final class LimitDashboardTests: XCTestCase {
             start,
             "The plotted bucket must begin at its first real measurement, not the bucket boundary."
         )
-        XCTAssertEqual(points[0].value, 30, accuracy: 0.001)
+        XCTAssertEqual(points[0].value, 70, accuracy: 0.001)
         XCTAssertGreaterThan(
             points[0].timestamp,
             start.addingTimeInterval(-60 * 60),
@@ -870,15 +869,15 @@ final class LimitDashboardTests: XCTestCase {
             at: sourceCapturedAt.addingTimeInterval(3 * 60 * 60)
         )
 
-        let points = try store.loadPrimaryUsedPoints(
+        let points = try store.loadPrimaryRemainingPoints(
             since: sourceCapturedAt.addingTimeInterval(-1)
         )
         XCTAssertEqual(points.count, 1)
         XCTAssertEqual(points.first?.timestamp, sourceCapturedAt)
-        XCTAssertEqual(points.first?.value, 42)
+        XCTAssertEqual(points.first?.value, 58)
     }
 
-    func testQuotaStateHistoryKeepsIdleClaudeAccountsAtZeroUsed() throws {
+    func testQuotaStateHistoryPlotsIdleClaudeAccountsAtFullRemaining() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "limit-dashboard-zero-quota-history-\(UUID().uuidString)",
             isDirectory: true
@@ -923,14 +922,14 @@ final class LimitDashboardTests: XCTestCase {
         }
         try store.record(snapshots, at: capturedAt)
 
-        let points = try store.loadPrimaryUsedPoints(
+        let points = try store.loadPrimaryRemainingPoints(
             since: capturedAt.addingTimeInterval(-1)
         )
         XCTAssertEqual(points.count, 2)
-        XCTAssertTrue(points.allSatisfy { $0.value == 0 })
+        XCTAssertTrue(points.allSatisfy { $0.value == 100 })
         XCTAssertFalse(
-            points.contains { $0.value == 100 },
-            "A 100% remaining baseline must never be plotted as activity or quota used."
+            points.contains { $0.value == 0 },
+            "An untouched window holds all of its quota, so it must plot at full remaining; plotting the used share here would read as exhausted."
         )
     }
 
@@ -1280,17 +1279,17 @@ final class LimitDashboardTests: XCTestCase {
             at: at
         )
 
-        let codexOnly = try store.loadPrimaryUsedPoints(
+        let codexOnly = try store.loadPrimaryRemainingPoints(
             since: at.addingTimeInterval(-60),
             slotID: codexSlot.id
         )
-        XCTAssertEqual(codexOnly.map(\.value), [57])
+        XCTAssertEqual(codexOnly.map(\.value), [43])
         XCTAssertEqual(Set(codexOnly.map(\.seriesID)), [codexSlot.id])
 
-        let everything = try store.loadPrimaryUsedPoints(
+        let everything = try store.loadPrimaryRemainingPoints(
             since: at.addingTimeInterval(-60)
         )
-        XCTAssertEqual(everything.map(\.value).sorted(), [11, 57])
+        XCTAssertEqual(everything.map(\.value).sorted(), [43, 89])
     }
 
     func testCodexPrimaryWeeklyWindowIsLabeledWeeklyNotFiveHour() throws {
