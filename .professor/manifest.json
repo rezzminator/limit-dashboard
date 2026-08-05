@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "version": "0.49.0",
+  "installed_from_tag": "local ~/.professor 0.49.0",
+  "installed_at": "2026-08-05T00:00:00Z",
+  "install_kind": "minimal",
+  "interview": {
+    "project_name": "limit-dashboard",
+    "project_pitch": "A native macOS dashboard showing per-account quota for local Claude Code, Codex, and Vertex AI sessions — read-only, on-device, no credential writes.",
+    "character_name": "Professor",
+    "character_voice": "keep",
+    "sacred_ground": "Credential handling — never exchange OAuth refresh tokens, never place tokens in args/env/logs, never publish personal emails or project names",
+    "structure": "single",
+    "subprojects": [],
+    "tech_commands": {
+      "limit-dashboard": {
+        "test": "swift test",
+        "build": "swift build",
+        "install": "./build_app.sh"
+      }
+    },
+    "tier_b": {}
+  },
+  "notes": "Minimal install: .professor metadata + the rr skill only. No commands, hooks, statusline, or tier-B roles. Run the full ~/.professor interactive installer if the project ever needs them.",
+  "files": {
+    ".claude/skills/rr/SKILL.md": "from ~/work/skills/rr @ 1.2.1",
+    ".claude/skills/rr/LICENSE": "from ~/work/skills/rr @ 1.2.1",
+    ".professor/VERSION": "0.49.0",
+    ".professor/decisions.md": "project decision log"
+  }
+}

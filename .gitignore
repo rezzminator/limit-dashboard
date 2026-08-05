@@ -8,6 +8,6 @@ Preview.png
 __pycache__/
 *.pyc
 
-RR/
+/RR/
 .worktrees/
 tmp/
