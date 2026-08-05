@@ -12,7 +12,7 @@ The causes and fixes:
 | Defect | Cause | Fix |
 |---|---|---|
 | A sample harvested seconds earlier displayed as `Cached`; the header `Live` count never counted Claude | `claudeSnapshotState` had no live tier — its best classification was `cached` | Added a five-minute live tier: `live` → `cached` (≤1h) → `aged` |
-| Account 2 showed no percentages while a valid 91% observation for its still-open window sat unused on disk | The identity-continuity check demanded a retained `.claude.json` backup older than the harvest. Backups rotate (five kept), so every observation older than the oldest retained backup was rejected forever | Continuity now returns `proven`/`unproven`/`contradicted`. Only observed evidence of an account change rejects a sample; absence of evidence does not |
+| Account 2 showed no percentages while a valid 91% observation for its still-open window sat unused on disk | The identity-continuity check demanded a retained `.claude.json` backup older than the harvest. Backups rotate (five kept), so every observation older than the oldest retained backup was rejected forever | The backup-scanning continuity check is gone. Each harvested sample now carries an `account_uuid` stamp from the config directory's own registry at harvest time; a sample is used only when that stamp matches the account currently signed into the slot, checked fresh on every read instead of proven across a window of retained backups |
 | Accounts with a still-open window rendered as `Quota snapshot expired` with every number blanked | `canDisplayQuotaValues` allowed only `live`/`cached` | An aged reading of an open window is a valid lower bound and is shown, labelled with its age and `usage may be higher`. Values are withheld only when no open window remains |
 | A 5-hour window from three days earlier rendered as a live 0% row | Claude omits `resets_at` when no window is open; the expiry guard skipped windows without one | A window with no reset timestamp is accepted only while its source file is still current |
 | Reported age could come from a sample that contributed nothing | `harvestedAt` was the newest harvest across all files, including ones rejected for expired windows | The age now belongs to the samples that supplied the displayed values |
@@ -67,26 +67,35 @@ The user's existing Claude Code status line receives Anthropic's documented
 contains 84% seven-day Used. The dashboard previously ignored that supported
 local source and therefore kept rendering the stale 73%.
 
-The app now prefers a status-line snapshot only when its slot number matches,
-it is no more than one hour old, its provider reset window remains active, and
-the on-disk registry proves it belongs to the current slot identity. If a state
-file was harmlessly rewritten after harvest, the app checks the surrounding
-local registry backups for uninterrupted account identity rather than
-discarding the fresh sample based on whole-file modification time alone.
-These checks still reject a real account change. The state file remains
+The app now prefers a status-line snapshot only when its `account_uuid` stamp
+matches the account currently signed into the slot's config directory,
+checked fresh against the on-disk registry on every read, it is no more than
+one hour old, and its provider reset window remains active. The stamp is
+written by the harvester at sample time from that config directory's own
+registry, so it is checked, never assumed — a state file rewritten
+harmlessly after harvest no longer matters, because there is nothing to prove
+across a time window: the sample is judged against the account signed in
+right now. An empty or mismatched stamp rejects the sample outright,
+regardless of how fresh or plausible its numbers look. The state file remains
 authoritative for the full email, account identity, plan, and cached
-Fable-specific limit. When a fresh slot sample exists but continuity cannot be
-proven, the card reports quota unavailable and suppresses the older cached
-percentages instead of presenting them as current.
+Fable-specific limit. When a fresh sample exists for the slot's account
+number but its stamp names a different account, the card reports quota
+unavailable and suppresses the older cached percentages instead of presenting
+them as current. Direct provider confirmation — querying the account's own
+signed-in session at most every three minutes — is now the primary source
+ahead of this local path; the status-line snapshot remains the fill-in
+between those confirmations and while the provider request is throttled or
+fails.
 
 The urgent regression was caused by the previous whole-file timestamp gate:
 the fresh slot-2 sample was harvested at 17:55 with 13% five-hour and 84%
 seven-day Used, then `.claude2/.claude.json` was rewritten at 18:04 without an
 account change. The app rejected the fresh sample and fell back to the old
-10%/73% cache. Backups immediately around both times contain the same current
-account identity. The new continuity check keeps 13%/84%, while a regression
-test verifies that an actual intervening account change yields no accepted
-sample.
+10%/73% cache. Under the current `account_uuid`-stamp design the sample would
+simply be accepted: the stamp names the same account signed in both before and
+after the rewrite, and there is no backup window to prove anything across. A
+regression test verifies the complementary case — an actual intervening
+account change yields no accepted sample.
 
 On 2026-07-30, a second selection regression exposed 73% again. The newest
 identity-matched slot-2 observation was 91% seven-day Used, captured at 11:50

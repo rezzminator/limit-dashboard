@@ -78,20 +78,14 @@ struct DashboardView: View {
                 IssueBanner(text: issue)
             }
 
+            // The chart and the Claude account cards it summarizes stay
+            // adjacent so the quota history sits next to the accounts it
+            // describes.
             HistoryChart(
                 series: model.historySeries,
                 error: model.historyError
             )
             .equatable()
-
-            CodexPanel(
-                snapshot: model.codexSnapshot,
-                series: model.codexSeries
-            )
-            .equatable()
-
-            VertexCard(accounts: model.vertexReports)
-                .equatable()
 
             let claudeCards = model.claudeSnapshots
             Grid(horizontalSpacing: 10, verticalSpacing: 10) {
@@ -115,6 +109,15 @@ struct DashboardView: View {
                     }
                 }
             }
+
+            CodexPanel(
+                snapshot: model.codexSnapshot,
+                series: model.codexSeries
+            )
+            .equatable()
+
+            VertexCard(accounts: model.vertexReports)
+                .equatable()
 
         }
         .padding(14)
@@ -521,17 +524,26 @@ private struct HistoryChart: View, Equatable {
         }
     }
 
+    // `series` already carries only the Claude accounts, in the same
+    // position order as the model's configured slots, so its own index
+    // stands in for an index into that slot list — mirroring the Vertex
+    // card's `color(for:)` below without needing the model threaded in here.
+    // Codex is never a member of `series`, so an id that is not found (Codex,
+    // or any id from a config the chart has not caught up to yet) keeps the
+    // fallback teal.
+    private static let claudePalette: [Color] = [
+        Color(red: 0.96, green: 0.34, blue: 0.24),
+        Color(red: 0.96, green: 0.68, blue: 0.20),
+        Color(red: 0.65, green: 0.42, blue: 0.95),
+        Color(red: 0.36, green: 0.62, blue: 0.95),
+        Color(red: 0.86, green: 0.36, blue: 0.62),
+    ]
+
     private func color(for slotID: String) -> Color {
-        switch slotID {
-        case "claude-1":
-            Color(red: 0.96, green: 0.34, blue: 0.24)
-        case "claude-2":
-            Color(red: 0.96, green: 0.68, blue: 0.20)
-        case "claude-3":
-            Color(red: 0.65, green: 0.42, blue: 0.95)
-        default:
-            Color(red: 0.16, green: 0.78, blue: 0.63)
+        guard let index = series.firstIndex(where: { $0.id == slotID }) else {
+            return Color(red: 0.16, green: 0.78, blue: 0.63)
         }
+        return Self.claudePalette[index % Self.claudePalette.count]
     }
 }
 

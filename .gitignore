@@ -7,3 +7,7 @@ Preview.png
 *.xcuserstate
 __pycache__/
 *.pyc
+
+RR/
+.worktrees/
+tmp/

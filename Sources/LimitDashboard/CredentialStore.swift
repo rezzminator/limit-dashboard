@@ -16,6 +16,14 @@ struct CredentialStore: Sendable {
         let fiveHourResetsAt: TimeInterval
         let sevenDayResetsAt: TimeInterval
         let harvestedAt: TimeInterval
+        /// The registry's `.oauthAccount.accountUuid` at harvest time, empty
+        /// when the harvester could not read it. This is the only thing that
+        /// binds a sample to an account with certainty: slot numbers stop
+        /// identifying accounts after `/login` and swaps, and upstream bug
+        /// anthropics/claude-code#68772 means even a correctly-stamped sample
+        /// can carry another account's numbers while sessions run
+        /// concurrently — so the stamp is checked, never assumed.
+        let accountUuid: String?
 
         enum CodingKeys: String, CodingKey {
             case accountSlot = "acct"
@@ -24,6 +32,7 @@ struct CredentialStore: Sendable {
             case fiveHourResetsAt = "five_hour_resets_at"
             case sevenDayResetsAt = "seven_day_resets_at"
             case harvestedAt = "ts"
+            case accountUuid = "account_uuid"
         }
     }
 
@@ -56,17 +65,14 @@ struct CredentialStore: Sendable {
     /// shortly *before* expiry, while the stored session is still accepted.
     static let proactiveRenewalMargin: TimeInterval = 15 * 60
     private let claudeRateLimitsDirectory: URL
-    private let claudeBackupsDirectoryOverride: URL?
 
     init(
         claudeRateLimitsDirectory: URL = URL(
             fileURLWithPath: "/tmp/cc-rate-limits",
             isDirectory: true
-        ),
-        claudeBackupsDirectory: URL? = nil
+        )
     ) {
         self.claudeRateLimitsDirectory = claudeRateLimitsDirectory
-        claudeBackupsDirectoryOverride = claudeBackupsDirectory
     }
 
     func load(_ slot: AccountSlot) -> LoadedCredential {
@@ -98,9 +104,6 @@ struct CredentialStore: Sendable {
         // source keeps reporting as long as any session is running.
         let cached = root["cachedUsageUtilization"] as? [String: Any]
         let utilization = cached?["utilization"] as? [String: Any] ?? [:]
-        let stateModifiedAt = (
-            try? url.resourceValues(forKeys: [.contentModificationDateKey])
-        )?.contentModificationDate
 
         let account = root["oauthAccount"] as? [String: Any]
         let registryIdentity = LocalIdentity(
@@ -155,10 +158,8 @@ struct CredentialStore: Sendable {
         var sourceName = "Local quota snapshot"
         let currentAccountID = account?["accountUuid"] as? String
         if
-            let stateModifiedAt,
             let statusLine = localClaudeRateLimits(
                 for: slot,
-                stateModifiedAt: stateModifiedAt,
                 currentAccountID: currentAccountID,
                 now: now
             )
@@ -170,10 +171,8 @@ struct CredentialStore: Sendable {
             fetchedAt = statusLine.harvestedAt
             sourceName = "Claude Code status line"
         } else if
-            let stateModifiedAt,
             let historicalStatusLine = localClaudeRateLimits(
                 for: slot,
-                stateModifiedAt: stateModifiedAt,
                 currentAccountID: currentAccountID,
                 maximumAge: nil,
                 now: now
@@ -190,10 +189,11 @@ struct CredentialStore: Sendable {
                 fetchedAt = historicalStatusLine.harvestedAt
                 sourceName = "Claude Code status line"
             }
-        } else if hasFreshClaudeRateLimitCandidate(for: slot, now: now) {
-            // A recent sample exists for this slot but the registry proves it
-            // belonged to a different account, so neither it nor the cache it
-            // would have replaced can be attributed to the account shown here.
+        } else if hasFreshClaudeRateLimitCandidate(for: slot, currentAccountID: currentAccountID, now: now) {
+            // A recent sample exists for this slot's account number, but its
+            // account_uuid stamp is proven to name a different account, so
+            // neither it nor the cache it would have replaced can be
+            // attributed to the account shown here.
             return AccountSnapshot.quotaUnavailable(
                 slot,
                 identity: registryIdentity.preferredDisplay ?? slot.localLabel,
@@ -216,6 +216,26 @@ struct CredentialStore: Sendable {
             fetchedAt: fetchedAt,
             now: now
         )
+
+        // Current data that affirmatively lacks an open 5-hour window means a
+        // full window is available — Claude Code has not started spending the
+        // next one yet — not that nothing was harvested for it. Hiding the row
+        // in that case read as breakage rather than as headroom.
+        if
+            (snapshotState == .live || snapshotState == .cached),
+            windows.contains(where: { $0.id == "seven-day" }),
+            !windows.contains(where: { $0.id == "five-hour" })
+        {
+            let syntheticFiveHour = UsageWindow(
+                id: "five-hour",
+                title: "5-hour",
+                usedPercent: 0,
+                resetAt: nil
+            )
+            let insertionIndex = windows.firstIndex { $0.id == "seven-day" }
+                ?? windows.endIndex
+            windows.insert(syntheticFiveHour, at: insertionIndex)
+        }
 
         let baseDetail: String = if let detail {
             detail
@@ -253,12 +273,18 @@ struct CredentialStore: Sendable {
 
     /// Whether to query Claude's usage endpoint directly.
     ///
-    /// Off by default. When enabled, the provider layer uses the bounded
-    /// curl_cffi transport bundled with the app. While disabled the app reads no
-    /// Claude Keychain item and makes no Claude request; the status-line harvest
-    /// remains the best available source.
+    /// On by default. The endpoint is the provider layer's primary source: it
+    /// is the only reading bound to an account with certainty, because a
+    /// per-account OAuth token belongs to exactly one account while slot
+    /// numbers and even correctly identity-stamped status-line samples can
+    /// still carry another account's numbers while sessions run concurrently
+    /// (upstream anthropics/claude-code#68772). Set
+    /// `LIMIT_DASHBOARD_CLAUDE_API=0` to fall back to local-only reads — no
+    /// Claude Keychain item is read and no Claude request is made — as a
+    /// kill-switch for diagnosing whether a discrepancy originates locally or
+    /// at the provider.
     static var claudeProviderQueriesEnabled: Bool {
-        ProcessInfo.processInfo.environment["LIMIT_DASHBOARD_CLAUDE_API"] == "1"
+        ProcessInfo.processInfo.environment["LIMIT_DASHBOARD_CLAUDE_API"] != "0"
     }
 
     private func loadClaude(
@@ -509,14 +535,10 @@ struct CredentialStore: Sendable {
     }
 
     func claudeConfigDirectory(for slot: AccountSlot) -> String? {
-        guard let stateURL = claudeStateURL(for: slot) else { return nil }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        // Slot one's registry is the root `~/.claude.json`, but its config
-        // directory — and therefore its Keychain item — is `~/.claude`.
-        if stateURL.deletingLastPathComponent().path == home.path {
-            return home.appendingPathComponent(".claude", isDirectory: true).path
-        }
-        return stateURL.deletingLastPathComponent().path
+        guard let configDirectory = slot.configDirectory else { return nil }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(configDirectory, isDirectory: true)
+            .path
     }
 
     private func claudeKeychainCredential(
@@ -701,13 +723,11 @@ struct CredentialStore: Sendable {
 
     func localClaudeRateLimits(
         for slot: AccountSlot,
-        stateModifiedAt: Date,
         currentAccountID: String? = nil,
         maximumAge: TimeInterval? = Self.statusLineSnapshotLifetime,
         now: Date = Date()
     ) -> ClaudeStatusLineRateLimits? {
-        guard slot.provider == .claude else { return nil }
-        let expectedSlot = slot.position + 1
+        guard slot.provider == .claude, let expectedSlot = slot.statusLineSlot else { return nil }
         guard
             let files = try? FileManager.default.contentsOfDirectory(
                 at: claudeRateLimitsDirectory,
@@ -732,6 +752,14 @@ struct CredentialStore: Sendable {
                     from: data
                 ),
                 sample.accountSlot == expectedSlot,
+                // The uuid stamp is the only certain link between a harvested
+                // sample and the account it describes; an empty or mismatched
+                // stamp makes the sample unusable regardless of how fresh or
+                // plausible its numbers look.
+                let accountUuid = sample.accountUuid,
+                !accountUuid.isEmpty,
+                let currentAccountID,
+                accountUuid == currentAccountID,
                 (0...100).contains(sample.fiveHourUsed),
                 (0...100).contains(sample.sevenDayUsed)
             else {
@@ -742,14 +770,7 @@ struct CredentialStore: Sendable {
             let age = now.timeIntervalSince(harvestedAt)
             guard
                 age >= -60,
-                maximumAge.map({ age <= $0 }) ?? true,
-                harvestedAt >= stateModifiedAt
-                    || registryIdentityContinuity(
-                        for: slot,
-                        currentAccountID: currentAccountID,
-                        from: harvestedAt,
-                        through: stateModifiedAt
-                    ) != .contradicted
+                maximumAge.map({ age <= $0 }) ?? true
             else {
                 return nil
             }
@@ -792,13 +813,20 @@ struct CredentialStore: Sendable {
         )
     }
 
+    /// Whether a recent, plausible sample exists for this slot's account
+    /// number whose uuid stamp *proves* it belongs to a different account —
+    /// as opposed to a sample that is merely absent or unstamped. The
+    /// distinction lets `cachedClaudeSnapshot` show "belongs to a different
+    /// account" only when that is positively known, rather than every time
+    /// `localClaudeRateLimits` simply found nothing to use.
     func hasFreshClaudeRateLimitCandidate(
         for slot: AccountSlot,
+        currentAccountID: String?,
         now: Date = Date()
     ) -> Bool {
-        guard slot.provider == .claude else { return false }
-        let expectedSlot = slot.position + 1
+        guard slot.provider == .claude, let expectedSlot = slot.statusLineSlot else { return false }
         guard
+            let currentAccountID, !currentAccountID.isEmpty,
             let files = try? FileManager.default.contentsOfDirectory(
                 at: claudeRateLimitsDirectory,
                 includingPropertiesForKeys: [.isRegularFileKey],
@@ -822,7 +850,10 @@ struct CredentialStore: Sendable {
                 ),
                 sample.accountSlot == expectedSlot,
                 (0...100).contains(sample.fiveHourUsed),
-                (0...100).contains(sample.sevenDayUsed)
+                (0...100).contains(sample.sevenDayUsed),
+                let accountUuid = sample.accountUuid,
+                !accountUuid.isEmpty,
+                accountUuid != currentAccountID
             else {
                 return false
             }
@@ -835,114 +866,6 @@ struct CredentialStore: Sendable {
                 && age <= Self.statusLineSnapshotLifetime
                 && hasActiveWindow
         }
-    }
-
-    enum RegistryIdentityContinuity {
-        /// A retained backup predates the harvest and names the current account.
-        case proven
-        /// Nothing on disk reaches back far enough to decide, and nothing
-        /// contradicts the sample either.
-        case unproven
-        /// The registry demonstrably belonged to a different account across the
-        /// harvest instant, so the sample cannot describe this account.
-        case contradicted
-    }
-
-    /// Answers whether the account signed into this config directory changed
-    /// between a sample's harvest and the current registry state.
-    ///
-    /// Claude rewrites `.claude.json` constantly for reasons unrelated to
-    /// identity, so whole-file modification time proves nothing on its own; the
-    /// retained backups are the only account-change evidence available. Those
-    /// backups rotate, so evidence older than the retained set simply does not
-    /// exist. This reports absence of evidence as `unproven` rather than as an
-    /// account change: demanding positive proof made every observation older
-    /// than the oldest retained backup permanently unusable, which is what left
-    /// accounts pinned to a days-old reading with no way to recover.
-    private func registryIdentityContinuity(
-        for slot: AccountSlot,
-        currentAccountID: String?,
-        from harvestedAt: Date,
-        through stateModifiedAt: Date
-    ) -> RegistryIdentityContinuity {
-        guard
-            let currentAccountID,
-            !currentAccountID.isEmpty,
-            let backupsDirectory = claudeBackupsURL(for: slot),
-            let files = try? FileManager.default.contentsOfDirectory(
-                at: backupsDirectory,
-                includingPropertiesForKeys: [
-                    .contentModificationDateKey,
-                    .isRegularFileKey,
-                ],
-                options: []
-            )
-        else {
-            return .unproven
-        }
-
-        var observations: [(date: Date, accountID: String)] = []
-        for file in files
-        where file.lastPathComponent.hasPrefix(".claude.json.backup.") {
-            guard
-                let values = try? file.resourceValues(
-                    forKeys: [
-                        .contentModificationDateKey,
-                        .isRegularFileKey,
-                    ]
-                ),
-                values.isRegularFile == true,
-                let modifiedAt = values.contentModificationDate,
-                modifiedAt <= stateModifiedAt,
-                let data = try? Data(contentsOf: file, options: [.mappedIfSafe]),
-                let root = try? JSONSerialization.jsonObject(with: data)
-                    as? [String: Any],
-                let account = root["oauthAccount"] as? [String: Any],
-                let accountID = account["accountUuid"] as? String,
-                !accountID.isEmpty
-            else {
-                continue
-            }
-            observations.append((modifiedAt, accountID))
-        }
-
-        // A backup written at or after the harvest that names a different
-        // account proves the registry was not this account across that instant.
-        let contradictedAfterHarvest = observations
-            .filter { $0.date > harvestedAt }
-            .contains { $0.accountID != currentAccountID }
-        if contradictedAfterHarvest {
-            return .contradicted
-        }
-
-        guard
-            let preceding = observations
-                .filter({ $0.date <= harvestedAt })
-                .max(by: { $0.date < $1.date })
-        else {
-            // The backups have rotated past the harvest. Nothing on either side
-            // disagrees with the sample, so it stays usable.
-            return .unproven
-        }
-        // The registry held another account immediately before the harvest and
-        // holds this one now, so the switch straddles the harvest instant.
-        return preceding.accountID == currentAccountID ? .proven : .contradicted
-    }
-
-    private func claudeBackupsURL(for slot: AccountSlot) -> URL? {
-        if let claudeBackupsDirectoryOverride {
-            return claudeBackupsDirectoryOverride
-        }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        if slot.position == 0 {
-            return home
-                .appendingPathComponent(".claude", isDirectory: true)
-                .appendingPathComponent("backups", isDirectory: true)
-        }
-        guard let stateURL = claudeStateURL(for: slot) else { return nil }
-        return stateURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("backups", isDirectory: true)
     }
 
     private struct SelectedStatusLineWindow {
@@ -1275,6 +1198,34 @@ final class SessionRenewalThrottle: @unchecked Sendable {
     static let shared = SessionRenewalThrottle()
 
     static let interval: TimeInterval = 10 * 60
+
+    private let lock = NSLock()
+    private var lastAttempt: [String: Date] = [:]
+
+    /// Records and permits an attempt only when one is not already recent.
+    func beginAttempt(for key: String, now: Date = Date()) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let previous = lastAttempt[key],
+           now.timeIntervalSince(previous) < Self.interval {
+            return false
+        }
+        lastAttempt[key] = now
+        return true
+    }
+}
+
+/// Spaces out direct queries to Claude's per-account usage endpoint.
+///
+/// The endpoint is undocumented and, outside the Claude Code client itself,
+/// aggressively rate-limited; the community-safe cadence discovered by usage
+/// monitors is roughly three minutes. Polling faster than this risks punitive
+/// 429s that can outlast the dashboard's own session, so a denied attempt
+/// falls back to the local snapshot rather than retrying immediately.
+final class ProviderQueryGate: @unchecked Sendable {
+    static let shared = ProviderQueryGate()
+
+    static let interval: TimeInterval = 180
 
     private let lock = NSLock()
     private var lastAttempt: [String: Date] = [:]

@@ -40,17 +40,44 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
     let title: String
     let localLabel: String
     let configuredEmail: String?
-    let claudeStatePath: String?
+    /// Home-relative Claude config directory (e.g. ".claude", ".claude2").
+    /// `nil` for Codex, which has no per-account directory of its own.
+    let configDirectory: String?
     let position: Int
 
-    static let configured: [AccountSlot] = [
+    /// Home-relative path to this account's `.claude.json` registry. The
+    /// default directory keeps its registry at the home root beside it rather
+    /// than inside it — Claude Code carries this special case forward from
+    /// when only one config directory existed.
+    var claudeStatePath: String? {
+        guard let configDirectory else { return nil }
+        return configDirectory == ".claude"
+            ? ".claude.json"
+            : "\(configDirectory)/.claude.json"
+    }
+
+    /// The account number the status-line harvester stamps into its file
+    /// names — the trailing integer of the config directory name, or 1 for
+    /// the bare ".claude". Harvest-file matching keys off this rather than
+    /// array position, so disabling one account cannot shift another's
+    /// harvest mapping onto the wrong slot.
+    var statusLineSlot: Int? {
+        guard let configDirectory else { return nil }
+        if configDirectory == ".claude" { return 1 }
+        let trailingDigits = String(
+            configDirectory.reversed().prefix(while: \.isNumber).reversed()
+        )
+        return trailingDigits.isEmpty ? nil : Int(trailingDigits)
+    }
+
+    static let defaultSlots: [AccountSlot] = [
         AccountSlot(
             id: "claude-1",
             provider: .claude,
             title: "Claude Account 1",
             localLabel: "account 1",
             configuredEmail: nil,
-            claudeStatePath: ".claude.json",
+            configDirectory: ".claude",
             position: 0
         ),
         AccountSlot(
@@ -59,7 +86,7 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
             title: "Claude Account 2",
             localLabel: "account 2",
             configuredEmail: nil,
-            claudeStatePath: ".claude2/.claude.json",
+            configDirectory: ".claude2",
             position: 1
         ),
         AccountSlot(
@@ -68,7 +95,7 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
             title: "Claude Account 3",
             localLabel: "account 3",
             configuredEmail: nil,
-            claudeStatePath: ".claude3/.claude.json",
+            configDirectory: ".claude3",
             position: 2
         ),
         AccountSlot(
@@ -77,10 +104,53 @@ struct AccountSlot: Identifiable, Hashable, Sendable {
             title: "Codex",
             localLabel: "primary",
             configuredEmail: nil,
-            claudeStatePath: nil,
+            configDirectory: nil,
             position: 3
         )
     ]
+
+    /// Accounts come from `~/.config/limit-dashboard/accounts.json` when that
+    /// file exists and decodes to at least one entry, so a checkout of this
+    /// repository names nobody's accounts. A missing file or one that fails to
+    /// decode falls back to the four historical slots, so chart history keyed
+    /// by their ids keeps its series. A file that decodes but disables every
+    /// entry is a deliberate "nothing enabled" state, not a decode failure, so
+    /// it returns an empty list rather than falling back — callers must
+    /// tolerate zero slots.
+    static func loadConfigured(
+        from url: URL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/limit-dashboard/accounts.json")
+    ) -> [AccountSlot] {
+        struct Stored: Decodable {
+            let id: String
+            let provider: String
+            let label: String
+            let configDirectory: String?
+            let email: String?
+            let enabled: Bool?
+        }
+        guard
+            let data = try? Data(contentsOf: url),
+            let stored = try? JSONDecoder().decode([Stored].self, from: data),
+            !stored.isEmpty
+        else {
+            return defaultSlots
+        }
+        return stored
+            .filter { $0.enabled ?? true }
+            .enumerated()
+            .map { index, entry in
+                AccountSlot(
+                    id: entry.id,
+                    provider: entry.provider == "codex" ? .codex : .claude,
+                    title: entry.label,
+                    localLabel: entry.label.lowercased(),
+                    configuredEmail: entry.email,
+                    configDirectory: entry.configDirectory,
+                    position: index
+                )
+            }
+    }
 }
 
 struct UsageWindow: Identifiable, Hashable, Sendable {

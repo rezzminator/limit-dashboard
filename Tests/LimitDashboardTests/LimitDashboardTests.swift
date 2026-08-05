@@ -2,13 +2,13 @@ import XCTest
 @testable import LimitDashboard
 
 final class LimitDashboardTests: XCTestCase {
-    func testConfiguredDashboardHasExactlyFourStableSlots() {
-        XCTAssertEqual(AccountSlot.configured.count, 4)
-        XCTAssertEqual(AccountSlot.configured.filter { $0.provider == .claude }.count, 3)
-        XCTAssertEqual(AccountSlot.configured.filter { $0.provider == .codex }.count, 1)
-        XCTAssertEqual(Set(AccountSlot.configured.map(\.id)).count, 4)
+    func testDefaultSlotsAreExactlyFourStableAccounts() {
+        XCTAssertEqual(AccountSlot.defaultSlots.count, 4)
+        XCTAssertEqual(AccountSlot.defaultSlots.filter { $0.provider == .claude }.count, 3)
+        XCTAssertEqual(AccountSlot.defaultSlots.filter { $0.provider == .codex }.count, 1)
+        XCTAssertEqual(Set(AccountSlot.defaultSlots.map(\.id)).count, 4)
         XCTAssertEqual(
-            AccountSlot.configured
+            AccountSlot.defaultSlots
                 .filter { $0.provider == .claude }
                 .map(\.title),
             ["Claude Account 1", "Claude Account 2", "Claude Account 3"]
@@ -16,7 +16,7 @@ final class LimitDashboardTests: XCTestCase {
         // Identity comes from each slot's own registry file; the checked-in
         // configuration names no one's mailbox.
         XCTAssertTrue(
-            AccountSlot.configured.allSatisfy { $0.configuredEmail == nil }
+            AccountSlot.defaultSlots.allSatisfy { $0.configuredEmail == nil }
         )
     }
 
@@ -93,6 +93,7 @@ final class LimitDashboardTests: XCTestCase {
         func writeSample(
             named name: String,
             account: Int,
+            accountUuid: String,
             sevenDayUsed: Int,
             harvestedAt: Date
         ) throws {
@@ -103,7 +104,8 @@ final class LimitDashboardTests: XCTestCase {
               "seven_day_used": \(sevenDayUsed),
               "five_hour_resets_at": \(fiveHourReset),
               "seven_day_resets_at": \(sevenDayReset),
-              "ts": \(harvestedAt.timeIntervalSince1970)
+              "ts": \(harvestedAt.timeIntervalSince1970),
+              "account_uuid": "\(accountUuid)"
             }
             """
             try Data(payload.utf8).write(
@@ -114,30 +116,33 @@ final class LimitDashboardTests: XCTestCase {
         try writeSample(
             named: "acct-2.older.json",
             account: 2,
+            accountUuid: "uuid-two",
             sevenDayUsed: 80,
             harvestedAt: now.addingTimeInterval(-10)
         )
         try writeSample(
             named: "acct-2.current.json",
             account: 2,
+            accountUuid: "uuid-two",
             sevenDayUsed: 82,
             harvestedAt: now.addingTimeInterval(-5)
         )
         try writeSample(
             named: "acct-2.wrong-account.json",
             account: 1,
+            accountUuid: "uuid-one",
             sevenDayUsed: 99,
             harvestedAt: now
         )
 
         let store = CredentialStore(claudeRateLimitsDirectory: directory)
         let accountTwo = try XCTUnwrap(
-            AccountSlot.configured.first { $0.position == 1 }
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
         )
         let statusLine = try XCTUnwrap(
             store.localClaudeRateLimits(
                 for: accountTwo,
-                stateModifiedAt: now.addingTimeInterval(-60),
+                currentAccountID: "uuid-two",
                 now: now
             )
         )
@@ -169,19 +174,18 @@ final class LimitDashboardTests: XCTestCase {
             merged.first { $0.id == "seven-day" }?.remainingPercent,
             18
         )
-        // A later rewrite of the registry file is not evidence of anything.
-        // Claude rewrites `.claude.json` constantly for unrelated reasons, so
-        // gating on whole-file modification time discarded good observations and
-        // pinned accounts to a days-old cache.
-        let afterBenignRewrite = try XCTUnwrap(
+        // Identity now comes from the sample's own account_uuid stamp rather
+        // than from comparing file modification times, so a later poll with
+        // the same stamp keeps reading the same current observation.
+        let onALaterPoll = try XCTUnwrap(
             store.localClaudeRateLimits(
                 for: accountTwo,
-                stateModifiedAt: now.addingTimeInterval(1),
-                now: now
+                currentAccountID: "uuid-two",
+                now: now.addingTimeInterval(1)
             ),
-            "A registry rewrite that carries no account change must not discard a current observation."
+            "The same account_uuid stamp must keep the observation usable on a later poll."
         )
-        XCTAssertEqual(afterBenignRewrite.sevenDay?.usedPercent, 82)
+        XCTAssertEqual(onALaterPoll.sevenDay?.usedPercent, 82)
     }
 
     func testStatusLineAgeReportsTheSampleThatSuppliedTheValue() throws {
@@ -206,7 +210,8 @@ final class LimitDashboardTests: XCTestCase {
           "acct": 2, "five_hour_used": 4, "seven_day_used": 88,
           "five_hour_resets_at": \(now.addingTimeInterval(-10).timeIntervalSince1970),
           "seven_day_resets_at": \(liveSevenDayReset.timeIntervalSince1970),
-          "ts": \(now.addingTimeInterval(-3_600).timeIntervalSince1970)
+          "ts": \(now.addingTimeInterval(-3_600).timeIntervalSince1970),
+          "account_uuid": "uuid-two"
         }
         """
         let expiredButNewer = """
@@ -214,7 +219,8 @@ final class LimitDashboardTests: XCTestCase {
           "acct": 2, "five_hour_used": 99, "seven_day_used": 99,
           "five_hour_resets_at": \(now.addingTimeInterval(-20).timeIntervalSince1970),
           "seven_day_resets_at": \(now.addingTimeInterval(-15).timeIntervalSince1970),
-          "ts": \(now.addingTimeInterval(-30).timeIntervalSince1970)
+          "ts": \(now.addingTimeInterval(-30).timeIntervalSince1970),
+          "account_uuid": "uuid-two"
         }
         """
         try Data(contributing.utf8).write(
@@ -226,12 +232,12 @@ final class LimitDashboardTests: XCTestCase {
 
         let store = CredentialStore(claudeRateLimitsDirectory: directory)
         let accountTwo = try XCTUnwrap(
-            AccountSlot.configured.first { $0.position == 1 }
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
         )
         let limits = try XCTUnwrap(
             store.localClaudeRateLimits(
                 for: accountTwo,
-                stateModifiedAt: now.addingTimeInterval(-7_200),
+                currentAccountID: "uuid-two",
                 maximumAge: nil,
                 now: now
             )
@@ -296,33 +302,75 @@ final class LimitDashboardTests: XCTestCase {
         )
     }
 
-    func testBenignRegistryRewriteKeepsFreshSlotTwoSampleWhenIdentityIsContinuous() throws {
+    func testHarvestSampleWithTheCurrentAccountsOwnUuidIsAcceptedButAnotherAccountsUuidIsRejected() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "limit-dashboard-claude-continuity-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        let rateDirectory = directory.appendingPathComponent(
-            "rate-limits",
-            isDirectory: true
-        )
-        let backupsDirectory = directory.appendingPathComponent(
-            "backups",
+            "limit-dashboard-claude-identity-\(UUID().uuidString)",
             isDirectory: true
         )
         try FileManager.default.createDirectory(
-            at: rateDirectory,
-            withIntermediateDirectories: true
-        )
-        try FileManager.default.createDirectory(
-            at: backupsDirectory,
+            at: directory,
             withIntermediateDirectories: true
         )
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let harvestedAt = now.addingTimeInterval(-30)
-        let stateModifiedAt = now.addingTimeInterval(-10)
         let sample = """
+        {
+          "acct": 2,
+          "five_hour_used": 13,
+          "seven_day_used": 84,
+          "five_hour_resets_at": \(now.addingTimeInterval(3_600).timeIntervalSince1970),
+          "seven_day_resets_at": \(now.addingTimeInterval(86_400).timeIntervalSince1970),
+          "ts": \(harvestedAt.timeIntervalSince1970),
+          "account_uuid": "account-two"
+        }
+        """
+        try Data(sample.utf8).write(
+            to: directory.appendingPathComponent("acct-2.session.json")
+        )
+
+        let store = CredentialStore(claudeRateLimitsDirectory: directory)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
+        )
+        let accepted = try XCTUnwrap(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                currentAccountID: "account-two",
+                now: now
+            )
+        )
+        XCTAssertEqual(accepted.fiveHour?.usedPercent, 13)
+        XCTAssertEqual(accepted.sevenDay?.usedPercent, 84)
+
+        XCTAssertNil(
+            store.localClaudeRateLimits(
+                for: accountTwo,
+                currentAccountID: "different-account",
+                now: now
+            ),
+            "A sample stamped for one account must not be attributed to another, even though both requests read the same file."
+        )
+    }
+
+    func testHarvestSampleWithAnAbsentOrEmptyAccountUuidIsRejectedEvenWhenOtherwisePlausible() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-claude-unstamped-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let harvestedAt = now.addingTimeInterval(-30)
+
+        // One file omits the stamp entirely; the other carries it empty. The
+        // harvester writes an empty stamp when it could not read the registry.
+        let absentStamp = """
         {
           "acct": 2,
           "five_hour_used": 13,
@@ -332,80 +380,129 @@ final class LimitDashboardTests: XCTestCase {
           "ts": \(harvestedAt.timeIntervalSince1970)
         }
         """
-        try Data(sample.utf8).write(
-            to: rateDirectory.appendingPathComponent("acct-2.session.json")
-        )
-
-        func writeBackup(
-            named name: String,
-            accountID: String,
-            modifiedAt: Date
-        ) throws -> URL {
-            let file = backupsDirectory.appendingPathComponent(name)
-            let payload = """
-            {"oauthAccount":{"accountUuid":"\(accountID)"}}
-            """
-            try Data(payload.utf8).write(to: file)
-            try FileManager.default.setAttributes(
-                [.modificationDate: modifiedAt],
-                ofItemAtPath: file.path
-            )
-            return file
+        let emptyStamp = """
+        {
+          "acct": 2,
+          "five_hour_used": 13,
+          "seven_day_used": 84,
+          "five_hour_resets_at": \(now.addingTimeInterval(3_600).timeIntervalSince1970),
+          "seven_day_resets_at": \(now.addingTimeInterval(86_400).timeIntervalSince1970),
+          "ts": \(harvestedAt.timeIntervalSince1970),
+          "account_uuid": ""
         }
-
-        _ = try writeBackup(
-            named: ".claude.json.backup.before",
-            accountID: "account-two",
-            modifiedAt: harvestedAt.addingTimeInterval(-30)
-        )
-        let after = try writeBackup(
-            named: ".claude.json.backup.after",
-            accountID: "account-two",
-            modifiedAt: harvestedAt.addingTimeInterval(10)
-        )
-
-        let store = CredentialStore(
-            claudeRateLimitsDirectory: rateDirectory,
-            claudeBackupsDirectory: backupsDirectory
-        )
-        let accountTwo = try XCTUnwrap(
-            AccountSlot.configured.first { $0.position == 1 }
-        )
-        let accepted = try XCTUnwrap(
-            store.localClaudeRateLimits(
-                for: accountTwo,
-                stateModifiedAt: stateModifiedAt,
-                currentAccountID: "account-two",
-                now: now
-            )
-        )
-        XCTAssertEqual(accepted.fiveHour?.usedPercent, 13)
-        XCTAssertEqual(accepted.sevenDay?.usedPercent, 84)
-
-        let changedAccount = """
-        {"oauthAccount":{"accountUuid":"different-account"}}
         """
-        try Data(changedAccount.utf8).write(to: after)
-        try FileManager.default.setAttributes(
-            [.modificationDate: harvestedAt.addingTimeInterval(10)],
-            ofItemAtPath: after.path
+        try Data(absentStamp.utf8).write(to: directory.appendingPathComponent("acct-2.absent.json"))
+        try Data(emptyStamp.utf8).write(to: directory.appendingPathComponent("acct-2.empty.json"))
+
+        let store = CredentialStore(claudeRateLimitsDirectory: directory)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
         )
         XCTAssertNil(
             store.localClaudeRateLimits(
                 for: accountTwo,
-                stateModifiedAt: stateModifiedAt,
                 currentAccountID: "account-two",
                 now: now
             ),
-            "A real account change between harvest and the current registry must invalidate the sample."
+            "A sample that carries no proof of whose account it describes must not be usable, no matter how plausible its numbers are."
         )
+    }
+
+    func testHasFreshClaudeRateLimitCandidateIsTrueOnlyWhenASampleIsPositivelyKnownToBelongToAnotherAccount() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-claude-fresh-candidate-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let store = CredentialStore(claudeRateLimitsDirectory: directory)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
+        )
+
+        XCTAssertFalse(
+            store.hasFreshClaudeRateLimitCandidate(for: accountTwo, currentAccountID: "account-two", now: now),
+            "With no sample on disk there is nothing to positively know belongs to someone else."
+        )
+
+        let sample = """
+        {
+          "acct": 2,
+          "five_hour_used": 13,
+          "seven_day_used": 84,
+          "five_hour_resets_at": \(now.addingTimeInterval(3_600).timeIntervalSince1970),
+          "seven_day_resets_at": \(now.addingTimeInterval(86_400).timeIntervalSince1970),
+          "ts": \(now.addingTimeInterval(-30).timeIntervalSince1970),
+          "account_uuid": "different-account"
+        }
+        """
+        try Data(sample.utf8).write(
+            to: directory.appendingPathComponent("acct-2.session.json")
+        )
+
         XCTAssertTrue(
-            store.hasFreshClaudeRateLimitCandidate(
-                for: accountTwo,
-                now: now
-            ),
+            store.hasFreshClaudeRateLimitCandidate(for: accountTwo, currentAccountID: "account-two", now: now),
             "The UI must distinguish a fresh-but-ambiguous sample from having no local source, so it can suppress the older cache."
         )
+    }
+
+    func testHarvestFileMatchingUsesTheStatusLineSlotNotArrayPositionWhenAMiddleAccountIsDisabled() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-claude-disabled-middle-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        // claude-2 was disabled and filtered out, so claude-3 was re-indexed to
+        // array position 1 even though its harvest files are still stamped
+        // "acct-3" — the config directory's own trailing digit, not the array
+        // position, must be what matching keys off.
+        let slotThree = AccountSlot(
+            id: "claude-3",
+            provider: .claude,
+            title: "Claude Account 3",
+            localLabel: "account 3",
+            configuredEmail: nil,
+            configDirectory: ".claude3",
+            position: 1
+        )
+        XCTAssertEqual(slotThree.statusLineSlot, 3)
+
+        let sample = """
+        {
+          "acct": 3,
+          "five_hour_used": 6,
+          "seven_day_used": 44,
+          "five_hour_resets_at": \(now.addingTimeInterval(3_600).timeIntervalSince1970),
+          "seven_day_resets_at": \(now.addingTimeInterval(86_400).timeIntervalSince1970),
+          "ts": \(now.addingTimeInterval(-5).timeIntervalSince1970),
+          "account_uuid": "uuid-three"
+        }
+        """
+        try Data(sample.utf8).write(
+            to: directory.appendingPathComponent("acct-3.session.json")
+        )
+
+        let store = CredentialStore(claudeRateLimitsDirectory: directory)
+        let limits = try XCTUnwrap(
+            store.localClaudeRateLimits(
+                for: slotThree,
+                currentAccountID: "uuid-three",
+                now: now
+            ),
+            "The re-indexed array position must not shift which harvest files this slot reads."
+        )
+        XCTAssertEqual(limits.sevenDay?.usedPercent, 44)
     }
 
     func testNewestIdentityMatchedActiveWindowBeatsOlderSeventyThreePercentCache() throws {
@@ -429,7 +526,8 @@ final class LimitDashboardTests: XCTestCase {
           "seven_day_used": 91,
           "five_hour_resets_at": \(now.addingTimeInterval(60 * 60).timeIntervalSince1970),
           "seven_day_resets_at": \(resetAt.timeIntervalSince1970),
-          "ts": \(harvestedAt.timeIntervalSince1970)
+          "ts": \(harvestedAt.timeIntervalSince1970),
+          "account_uuid": "uuid-two"
         }
         """
         try Data(sample.utf8).write(
@@ -438,12 +536,12 @@ final class LimitDashboardTests: XCTestCase {
 
         let store = CredentialStore(claudeRateLimitsDirectory: directory)
         let accountTwo = try XCTUnwrap(
-            AccountSlot.configured.first { $0.position == 1 }
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
         )
         XCTAssertNil(
             store.localClaudeRateLimits(
                 for: accountTwo,
-                stateModifiedAt: harvestedAt.addingTimeInterval(-60),
+                currentAccountID: "uuid-two",
                 now: now
             ),
             "The three-hour-old observation must not be labeled fresh."
@@ -451,7 +549,7 @@ final class LimitDashboardTests: XCTestCase {
         let historical = try XCTUnwrap(
             store.localClaudeRateLimits(
                 for: accountTwo,
-                stateModifiedAt: harvestedAt.addingTimeInterval(-60),
+                currentAccountID: "uuid-two",
                 maximumAge: nil,
                 now: now
             )
@@ -518,10 +616,84 @@ final class LimitDashboardTests: XCTestCase {
     }
 
     func testCanonicalClaudeStateRegistryUsesTheRootFileForAccountOne() {
-        let claude = AccountSlot.configured.filter { $0.provider == .claude }
+        let claude = AccountSlot.defaultSlots.filter { $0.provider == .claude }
         XCTAssertEqual(
             claude.map(\.claudeStatePath),
             [".claude.json", ".claude2/.claude.json", ".claude3/.claude.json"]
+        )
+    }
+
+    func testStatusLineSlotIsTheConfigDirectorysTrailingDigitOrOneForTheBareDirectory() {
+        func slot(configDirectory: String?) -> AccountSlot {
+            AccountSlot(
+                id: "x",
+                provider: configDirectory == nil ? .codex : .claude,
+                title: "x",
+                localLabel: "x",
+                configuredEmail: nil,
+                configDirectory: configDirectory,
+                position: 0
+            )
+        }
+        XCTAssertEqual(slot(configDirectory: ".claude").statusLineSlot, 1)
+        XCTAssertEqual(slot(configDirectory: ".claude2").statusLineSlot, 2)
+        XCTAssertEqual(slot(configDirectory: ".claude9").statusLineSlot, 9)
+        XCTAssertNil(
+            slot(configDirectory: nil).statusLineSlot,
+            "Codex has no per-account config directory, so it has no harvest slot number."
+        )
+    }
+
+    func testLoadConfiguredFromACustomFilePreservesOrderExcludesDisabledAndReindexesPositions() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("limit-dashboard-accounts-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data("""
+        [
+          {"id": "acct-a", "provider": "claude", "label": "A", "configDirectory": ".claude"},
+          {"id": "acct-b", "provider": "claude", "label": "B", "configDirectory": ".claude2", "enabled": false},
+          {"id": "acct-c", "provider": "claude", "label": "C", "configDirectory": ".claude3"},
+          {"id": "acct-d", "provider": "codex", "label": "D"}
+        ]
+        """.utf8).write(to: url)
+
+        let slots = AccountSlot.loadConfigured(from: url)
+
+        XCTAssertEqual(
+            slots.map(\.id),
+            ["acct-a", "acct-c", "acct-d"],
+            "The disabled entry must be excluded without disturbing the order of the rest."
+        )
+        XCTAssertEqual(
+            slots.map(\.position),
+            [0, 1, 2],
+            "Positions are re-indexed after filtering, not carried over from the file's own indices."
+        )
+    }
+
+    func testLoadConfiguredFallsBackToDefaultSlotsWhenTheFileIsMissingButNotWhenEveryEntryIsDisabled() throws {
+        let missingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("limit-dashboard-accounts-missing-\(UUID().uuidString).json")
+        XCTAssertEqual(
+            AccountSlot.loadConfigured(from: missingURL),
+            AccountSlot.defaultSlots,
+            "A missing file falls back to the historical slots so chart history keeps its series."
+        )
+
+        let allDisabledURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("limit-dashboard-accounts-all-disabled-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: allDisabledURL) }
+        try Data("""
+        [
+          {"id": "acct-a", "provider": "claude", "label": "A", "configDirectory": ".claude", "enabled": false},
+          {"id": "acct-b", "provider": "codex", "label": "B", "enabled": false}
+        ]
+        """.utf8).write(to: allDisabledURL)
+
+        XCTAssertEqual(
+            AccountSlot.loadConfigured(from: allDisabledURL),
+            [],
+            "Every entry disabled is a deliberate nothing-enabled state, not a decode failure, so it must not fall back to the defaults."
         )
     }
 
@@ -603,8 +775,121 @@ final class LimitDashboardTests: XCTestCase {
         )
     }
 
+    /// Builds an isolated account whose registry lives under a uniquely named
+    /// directory of its own inside the real home directory — `claudeStateURL`
+    /// is not injectable, so this is the only way to exercise
+    /// `cachedClaudeSnapshot` without touching this machine's actual Claude
+    /// state. The directory is removed by the caller's `defer`.
+    private func makeIsolatedClaudeRegistry(
+        fetchedAt: Date,
+        sevenDayResetAt: Date
+    ) throws -> (slot: AccountSlot, configURL: URL) {
+        let configDirectoryName = "limit-dashboard-test-\(UUID().uuidString)"
+        let configURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(configDirectoryName, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: configURL,
+            withIntermediateDirectories: true
+        )
+        let slot = AccountSlot(
+            id: "synthetic-slot",
+            provider: .claude,
+            title: "Synthetic",
+            localLabel: "synthetic",
+            configuredEmail: nil,
+            configDirectory: configDirectoryName,
+            position: 0
+        )
+        let resetsAt = ISO8601DateFormatter().string(from: sevenDayResetAt)
+        let registry = """
+        {
+          "oauthAccount": {"accountUuid": "uuid-synth", "emailAddress": "synth@example.com"},
+          "cachedUsageUtilization": {
+            "fetchedAtMs": \(fetchedAt.timeIntervalSince1970 * 1_000),
+            "accountUuid": "uuid-synth",
+            "utilization": {
+              "seven_day": {"utilization": 42.0, "resets_at": "\(resetsAt)"}
+            }
+          }
+        }
+        """
+        try Data(registry.utf8).write(to: configURL.appendingPathComponent(".claude.json"))
+        return (slot, configURL)
+    }
+
+    func testCachedClaudeSnapshotSynthesizesAFullFiveHourWindowWhenOnlyASevenDayWindowIsCurrent() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let (slot, configURL) = try makeIsolatedClaudeRegistry(
+            fetchedAt: now.addingTimeInterval(-10 * 60),
+            sevenDayResetAt: now.addingTimeInterval(24 * 60 * 60)
+        )
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let rateLimitsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "limit-dashboard-empty-rate-limits-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: rateLimitsDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: rateLimitsDirectory) }
+
+        let store = CredentialStore(claudeRateLimitsDirectory: rateLimitsDirectory)
+        let snapshot = try XCTUnwrap(
+            store.cachedClaudeSnapshot(
+                for: slot,
+                identity: LocalIdentity(email: nil, displayName: nil, organizationName: nil),
+                now: now
+            )
+        )
+        XCTAssertEqual(snapshot.state, .cached)
+        XCTAssertEqual(
+            snapshot.windows.map(\.id),
+            ["five-hour", "seven-day"],
+            "The synthesized window is ordered first, ahead of the seven-day window it stands in for."
+        )
+        let fiveHour = try XCTUnwrap(snapshot.windows.first)
+        XCTAssertEqual(fiveHour.usedPercent, 0)
+        XCTAssertEqual(fiveHour.remainingPercent, 100)
+    }
+
+    func testCachedClaudeSnapshotDoesNotSynthesizeAFiveHourWindowWhenTheSourceIsStale() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let (slot, configURL) = try makeIsolatedClaudeRegistry(
+            fetchedAt: now.addingTimeInterval(-3 * 60 * 60),
+            sevenDayResetAt: now.addingTimeInterval(24 * 60 * 60)
+        )
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let rateLimitsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "limit-dashboard-empty-rate-limits-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: rateLimitsDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: rateLimitsDirectory) }
+
+        let store = CredentialStore(claudeRateLimitsDirectory: rateLimitsDirectory)
+        let snapshot = try XCTUnwrap(
+            store.cachedClaudeSnapshot(
+                for: slot,
+                identity: LocalIdentity(email: nil, displayName: nil, organizationName: nil),
+                now: now
+            )
+        )
+        XCTAssertEqual(snapshot.state, .stale)
+        XCTAssertEqual(
+            snapshot.windows.map(\.id),
+            ["seven-day"],
+            "A stale source must not synthesize a five-hour window it has no evidence for."
+        )
+    }
+
     func testUnchangedPollSnapshotComparesEqualDespiteNewFetchTime() throws {
-        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first)
         let window = UsageWindow(
             id: "five-hour",
             title: "5-hour",
@@ -641,7 +926,7 @@ final class LimitDashboardTests: XCTestCase {
     }
 
     func testAgedSnapshotStillShowsAnActiveWindowButIsMarkedAged() throws {
-        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first)
         let window = UsageWindow(
             id: "seven-day",
             title: "7-day",
@@ -689,7 +974,7 @@ final class LimitDashboardTests: XCTestCase {
         let store = HistoryStore(
             databaseURL: directory.appendingPathComponent("history.sqlite3")
         )
-        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first)
         let old = Date(timeIntervalSince1970: 1_900_000_000)
         let recent = old.addingTimeInterval(6 * 60 * 60)
 
@@ -743,7 +1028,7 @@ final class LimitDashboardTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let databaseURL = directory.appendingPathComponent("history.sqlite3")
         let store = HistoryStore(databaseURL: databaseURL)
-        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first)
         let start = Date(timeIntervalSince1970: 1_800_000_123)
 
         func snapshot(
@@ -830,7 +1115,7 @@ final class LimitDashboardTests: XCTestCase {
         let store = HistoryStore(
             databaseURL: directory.appendingPathComponent("history.sqlite3")
         )
-        let slot = try XCTUnwrap(AccountSlot.configured.first)
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first)
         let sourceCapturedAt = Date(timeIntervalSince1970: 1_900_000_000)
 
         func snapshot(refreshedAt: Date?) -> AccountSnapshot {
@@ -886,7 +1171,7 @@ final class LimitDashboardTests: XCTestCase {
         let store = HistoryStore(
             databaseURL: directory.appendingPathComponent("history.sqlite3")
         )
-        let idleSlots = AccountSlot.configured.filter {
+        let idleSlots = AccountSlot.defaultSlots.filter {
             $0.id == "claude-1" || $0.id == "claude-3"
         }
         XCTAssertEqual(idleSlots.count, 2)
@@ -1135,7 +1420,7 @@ final class LimitDashboardTests: XCTestCase {
     }
 
     func testLocalCodexCredentialIsReadableWithoutExposingValues() throws {
-        let slot = try XCTUnwrap(AccountSlot.configured.first { $0.provider == .codex })
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first { $0.provider == .codex })
         let loaded = CredentialStore().load(slot)
         if case .codex(_, let credential) = loaded {
             XCTAssertTrue(credential.identity.email?.contains("@") == true)
@@ -1155,7 +1440,7 @@ final class LimitDashboardTests: XCTestCase {
         // Reading through /usr/bin/security uses an ACL entry macOS already
         // grants. A regression here is silent apart from the panel returning,
         // so the read is asserted to complete on its own.
-        for slot in AccountSlot.configured where slot.provider == .claude {
+        for slot in AccountSlot.defaultSlots where slot.provider == .claude {
             let configDirectory = try XCTUnwrap(
                 CredentialStore().claudeConfigDirectory(for: slot)
             )
@@ -1244,10 +1529,10 @@ final class LimitDashboardTests: XCTestCase {
             databaseURL: directory.appendingPathComponent("history.sqlite3")
         )
         let claudeSlot = try XCTUnwrap(
-            AccountSlot.configured.first { $0.provider == .claude }
+            AccountSlot.defaultSlots.first { $0.provider == .claude }
         )
         let codexSlot = try XCTUnwrap(
-            AccountSlot.configured.first { $0.provider == .codex }
+            AccountSlot.defaultSlots.first { $0.provider == .codex }
         )
         let at = Date(timeIntervalSince1970: 1_900_000_000)
 
@@ -1309,7 +1594,7 @@ final class LimitDashboardTests: XCTestCase {
           }
         }
         """
-        let slot = try XCTUnwrap(AccountSlot.configured.first { $0.provider == .codex })
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first { $0.provider == .codex })
         let credential = CodexCredential(
             accessToken: "t",
             accountID: "acct-1",
@@ -1348,7 +1633,7 @@ final class LimitDashboardTests: XCTestCase {
           }
         }
         """
-        let slot = try XCTUnwrap(AccountSlot.configured.first { $0.provider == .codex })
+        let slot = try XCTUnwrap(AccountSlot.defaultSlots.first { $0.provider == .codex })
         let credential = CodexCredential(
             accessToken: "t",
             accountID: "acct-1",
@@ -1368,8 +1653,18 @@ final class LimitDashboardTests: XCTestCase {
             throw XCTSkip("Live provider network validation is opt-in.")
         }
 
+        // This machine's own accounts.json decides which accounts are enabled,
+        // so the count is read from it rather than assumed — a test that
+        // hardcoded an account count would fail the moment this machine's own
+        // configuration changed.
+        let configuredSlots = AccountSlot.loadConfigured()
+        let enabledClaudeSlots = configuredSlots.filter { $0.provider == .claude }
+        guard !enabledClaudeSlots.isEmpty else {
+            throw XCTSkip("No Claude account is enabled in accounts.json on this machine.")
+        }
+
         let store = CredentialStore()
-        let loaded = AccountSlot.configured.map(store.load)
+        let loaded = configuredSlots.map(store.load)
         let api = ProviderAPI()
 
         var codexWasLive = false
@@ -1386,7 +1681,11 @@ final class LimitDashboardTests: XCTestCase {
                     credential: credential,
                     store: store
                 )
-                XCTAssertEqual(snapshot.state, .live)
+                XCTAssertEqual(
+                    snapshot.state,
+                    .live,
+                    "\(slot.id) did not produce a live provider reading."
+                )
                 XCTAssertFalse(snapshot.windows.isEmpty)
                 XCTAssertFalse(
                     snapshot.windows.contains { $0.usedPercent < 0 || $0.usedPercent > 100 },
@@ -1401,8 +1700,8 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertTrue(codexWasLive, "Codex usage endpoint did not return a live window.")
         XCTAssertEqual(
             liveClaudeAccounts,
-            3,
-            "Every configured Claude account must produce a live provider reading."
+            enabledClaudeSlots.count,
+            "Every enabled Claude account must produce a live provider reading."
         )
     }
 
@@ -1433,7 +1732,7 @@ final class LimitDashboardTests: XCTestCase {
     func testSlotOneUsesTheClaudeDirectoryEvenThoughItsRegistryIsAtHome() throws {
         let store = CredentialStore()
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let slots = AccountSlot.configured.filter { $0.provider == .claude }
+        let slots = AccountSlot.defaultSlots.filter { $0.provider == .claude }
         XCTAssertEqual(
             slots.map { store.claudeConfigDirectory(for: $0) },
             ["\(home)/.claude", "\(home)/.claude2", "\(home)/.claude3"],
@@ -1442,7 +1741,7 @@ final class LimitDashboardTests: XCTestCase {
         XCTAssertNil(
             store.claudeConfigDirectory(
                 for: try XCTUnwrap(
-                    AccountSlot.configured.first { $0.provider == .codex }
+                    AccountSlot.defaultSlots.first { $0.provider == .codex }
                 )
             )
         )
@@ -1505,6 +1804,28 @@ final class LimitDashboardTests: XCTestCase {
                 now: now.addingTimeInterval(1)
             ),
             "Throttling is per account, not global."
+        )
+    }
+
+    func testProviderQueryGateThrottlesRepeatedAttemptsPerKeyButAdmitsOtherKeysAndLaterAttempts() {
+        let gate = ProviderQueryGate()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+        XCTAssertTrue(gate.beginAttempt(for: "claude-2", now: now))
+        XCTAssertFalse(
+            gate.beginAttempt(for: "claude-2", now: now.addingTimeInterval(1)),
+            "A second attempt within the 180s interval must be denied."
+        )
+        XCTAssertTrue(
+            gate.beginAttempt(for: "claude-3", now: now.addingTimeInterval(1)),
+            "Throttling is per key, not global."
+        )
+        XCTAssertFalse(
+            gate.beginAttempt(for: "claude-2", now: now.addingTimeInterval(179))
+        )
+        XCTAssertTrue(
+            gate.beginAttempt(for: "claude-2", now: now.addingTimeInterval(181)),
+            "After the interval a query may be attempted again."
         )
     }
 

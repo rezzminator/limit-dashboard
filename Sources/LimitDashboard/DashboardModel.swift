@@ -3,22 +3,18 @@ import Foundation
 
 @MainActor
 final class DashboardModel: ObservableObject {
+    /// The account list read once for the properties below's own default
+    /// values. `performRefresh` re-reads the file itself on every cycle, so
+    /// this cached copy only avoids reading it three times over at startup.
+    private static let initialSlots: [AccountSlot] = AccountSlot.loadConfigured()
+
     @Published private(set) var snapshots: [AccountSnapshot] =
-        AccountSlot.configured.map(AccountSnapshot.loading)
+        DashboardModel.initialSlots.map(AccountSnapshot.loading)
     // The shared 24-hour chart carries only the providers whose primary window is
     // short enough to move within it. Codex's weekly window is charted on its own
     // panel, over its own period and value range.
     @Published private(set) var historySeries: [ChartSeries] =
-        AccountSlot.configured
-            .filter { $0.provider == .claude }
-            .map {
-                ChartSeries(
-                    id: $0.id,
-                    label: $0.title,
-                    unit: .percentUsed,
-                    points: []
-                )
-            }
+        DashboardModel.historySeriesSkeleton(for: DashboardModel.initialSlots)
     @Published private(set) var codexSeries: ChartSeries?
     @Published private(set) var historyError: String?
     @Published private(set) var vertexReports: [VertexAccountReport] =
@@ -31,8 +27,20 @@ final class DashboardModel: ObservableObject {
     private let historyStore = HistoryStore()
     private var lastVertexAttempt: Date?
 
-    private static let codexSlotID: String? = AccountSlot.configured
-        .first { $0.provider == .codex }?.id
+    /// The configured account list, reloaded at the top of every refresh so
+    /// enabling, disabling, or adding an account in accounts.json takes
+    /// effect without restarting the app.
+    private(set) var slots: [AccountSlot] = DashboardModel.initialSlots
+
+    /// The provider's own last-confirmed reading for a Claude slot. Kept so a
+    /// card can still show it — honestly re-aged, never as live — when a
+    /// later cycle's query is throttled or fails outright rather than
+    /// reverting straight to the local snapshot.
+    private var providerSnapshotMemo: [String: AccountSnapshot] = [:]
+
+    private var codexSlotID: String? {
+        slots.first { $0.provider == .codex }?.id
+    }
 
     var codexSnapshot: AccountSnapshot? {
         snapshots.first { $0.slot.provider == .codex }
@@ -123,21 +131,57 @@ final class DashboardModel: ObservableObject {
         await work.value
     }
 
+    /// The chart series shell for a slot list, with no points yet. Used both
+    /// for the property's own startup value and to keep the legend in step
+    /// the moment accounts.json changes, ahead of the history query that
+    /// fills the points back in a little later in the same refresh.
+    private static func historySeriesSkeleton(for slots: [AccountSlot]) -> [ChartSeries] {
+        slots
+            .filter { $0.provider == .claude }
+            .map {
+                ChartSeries(id: $0.id, label: $0.title, unit: .percentUsed, points: [])
+            }
+    }
+
+    /// Reconciles snapshot and chart state against a freshly loaded slot
+    /// list. A vanished id drops its card and its provider memo; a new id
+    /// gets a loading card and an empty chart series until its own data
+    /// arrives. A no-op when the configured list has not changed.
+    private func reconcileSlots(_ newSlots: [AccountSlot]) {
+        guard newSlots != slots else { return }
+        slots = newSlots
+        let validIDs = Set(newSlots.map(\.id))
+        snapshots.removeAll { !validIDs.contains($0.id) }
+        let presentIDs = Set(snapshots.map(\.id))
+        for slot in newSlots where !presentIDs.contains(slot.id) {
+            snapshots.append(AccountSnapshot.loading(slot))
+        }
+        snapshots.sort { $0.slot.position < $1.slot.position }
+        historySeries = Self.historySeriesSkeleton(for: newSlots)
+        providerSnapshotMemo = providerSnapshotMemo.filter { validIDs.contains($0.key) }
+    }
+
     private func performRefresh() async {
+        reconcileSlots(AccountSlot.loadConfigured())
+        let currentSlots = slots
         let store = CredentialStore()
         let loaded = await Task.detached(priority: .userInitiated) {
-            AccountSlot.configured.map(store.load)
+            currentSlots.map(store.load)
         }.value
         var results: [AccountSnapshot] = []
 
-        await withTaskGroup(of: AccountSnapshot.self) { group in
+        await withTaskGroup(of: FetchOutcome.self) { group in
             for credential in loaded {
+                let memoized = providerSnapshotMemo[credential.slot.id]
                 group.addTask {
-                    await Self.fetch(credential, store: store)
+                    await Self.fetch(credential, store: store, memoizedProviderSnapshot: memoized)
                 }
             }
-            for await snapshot in group {
-                results.append(snapshot)
+            for await outcome in group {
+                results.append(outcome.snapshot)
+                if let providerSnapshot = outcome.providerSnapshot {
+                    providerSnapshotMemo[outcome.snapshot.slot.id] = providerSnapshot
+                }
             }
         }
 
@@ -148,7 +192,7 @@ final class DashboardModel: ObservableObject {
 
         let capturedAt = Date()
         let historyStore = historyStore
-        let codexSlotID = Self.codexSlotID
+        let codexSlotID = codexSlotID
         let historyResult = await Task.detached(
             priority: .utility
         ) { [historyStore, finalizedResults, capturedAt, codexSlotID] in
@@ -244,7 +288,7 @@ final class DashboardModel: ObservableObject {
         switch result {
         case .success(let points, let codexPoints):
             let grouped = Dictionary(grouping: points, by: \.seriesID)
-            let nextSeries = AccountSlot.configured
+            let nextSeries = slots
                 .filter { $0.provider == .claude }
                 .map { slot in
                     ChartSeries(
@@ -257,7 +301,7 @@ final class DashboardModel: ObservableObject {
             if historySeries != nextSeries {
                 historySeries = nextSeries
             }
-            let nextCodex = Self.codexSlotID.map { slotID in
+            let nextCodex = codexSlotID.map { slotID in
                 ChartSeries(
                     id: slotID,
                     label: "Codex",
@@ -290,16 +334,41 @@ final class DashboardModel: ObservableObject {
         }
     }
 
+    /// A completed fetch, plus a fresh provider reading when this cycle
+    /// produced one. Kept separate from `snapshot` so a memo write only
+    /// happens on a live, provider-confirmed read — never on a value that was
+    /// itself reused from an earlier memo — which would otherwise let a stale
+    /// reading refresh its own timestamp indefinitely.
+    private struct FetchOutcome: Sendable {
+        let snapshot: AccountSnapshot
+        let providerSnapshot: AccountSnapshot?
+    }
+
     private nonisolated static func fetch(
         _ loaded: LoadedCredential,
-        store: CredentialStore
-    ) async -> AccountSnapshot {
+        store: CredentialStore,
+        memoizedProviderSnapshot: AccountSnapshot?
+    ) async -> FetchOutcome {
         let api = ProviderAPI()
         do {
             switch loaded {
             case .codex(let slot, let credential):
-                return try await api.fetchCodex(slot: slot, credential: credential)
+                let snapshot = try await api.fetchCodex(slot: slot, credential: credential)
+                return FetchOutcome(snapshot: snapshot, providerSnapshot: nil)
             case .claude(let slot, let credential):
+                // The usage endpoint is undocumented and punitively rate
+                // limited, so it is queried on its own cadence rather than
+                // every poll. A denied attempt falls back to the local
+                // snapshot exactly as a failed request would.
+                guard ProviderQueryGate.shared.beginAttempt(for: slot.id) else {
+                    let snapshot = fallbackClaudeSnapshot(
+                        slot: slot,
+                        credential: credential,
+                        store: store,
+                        memoizedProviderSnapshot: memoizedProviderSnapshot
+                    )
+                    return FetchOutcome(snapshot: snapshot, providerSnapshot: nil)
+                }
                 do {
                     let snapshot = try await api.fetchClaude(
                         slot: slot,
@@ -307,21 +376,19 @@ final class DashboardModel: ObservableObject {
                         store: store
                     )
                     debugLog("\(slot.id): API OK state=\(snapshot.state.title)")
-                    return snapshot
+                    return FetchOutcome(snapshot: snapshot, providerSnapshot: snapshot)
                 } catch {
                     debugLog("\(slot.id): API FAILED \(compact(error))")
                     // A rejected token or an unreachable provider must not blank
                     // the card: the local snapshot is still the best known state.
-                    return store.cachedClaudeSnapshot(
-                        for: slot,
-                        identity: credential.identity,
+                    let snapshot = fallbackClaudeSnapshot(
+                        slot: slot,
+                        credential: credential,
+                        store: store,
+                        memoizedProviderSnapshot: memoizedProviderSnapshot,
                         note: "provider request failed (\(compact(error)))"
-                    ) ?? AccountSnapshot.unavailable(
-                        slot,
-                        identity: credential.identity.preferredDisplay,
-                        plan: credential.plan,
-                        detail: friendly(error)
                     )
+                    return FetchOutcome(snapshot: snapshot, providerSnapshot: nil)
                 }
             case .failed(let slot, let identity, let message):
                 if slot.provider == .claude {
@@ -335,7 +402,7 @@ final class DashboardModel: ObservableObject {
                     // a note; with no values at all it is the whole story. When
                     // provider queries are switched off there was nothing to
                     // explain, so the card is left to speak for its own source.
-                    return store.cachedClaudeSnapshot(
+                    let snapshot = store.cachedClaudeSnapshot(
                         for: slot,
                         identity: resolvedIdentity,
                         note: CredentialStore.claudeProviderQueriesEnabled
@@ -346,19 +413,80 @@ final class DashboardModel: ObservableObject {
                         identity: identity?.preferredDisplay,
                         detail: message
                     )
+                    return FetchOutcome(snapshot: snapshot, providerSnapshot: nil)
                 }
-                return AccountSnapshot.unavailable(
-                    slot,
-                    identity: identity?.preferredDisplay,
-                    detail: message
+                return FetchOutcome(
+                    snapshot: AccountSnapshot.unavailable(
+                        slot,
+                        identity: identity?.preferredDisplay,
+                        detail: message
+                    ),
+                    providerSnapshot: nil
                 )
             }
         } catch {
-            return AccountSnapshot.unavailable(
-                loaded.slot,
-                detail: friendly(error)
+            return FetchOutcome(
+                snapshot: AccountSnapshot.unavailable(
+                    loaded.slot,
+                    detail: friendly(error)
+                ),
+                providerSnapshot: nil
             )
         }
+    }
+
+    /// Builds a Claude card from local sources for a cycle in which the
+    /// provider was not queried — the request throttle denied the attempt or
+    /// the request itself failed. When an earlier cycle's provider reading is
+    /// newer than what the local sources produced, or the local sources
+    /// produced nothing displayable at all, that reading is shown again with
+    /// its state re-derived from its own age — so a memo that is getting old
+    /// honestly turns `.cached` or `.stale` rather than continuing to read as
+    /// live.
+    private nonisolated static func fallbackClaudeSnapshot(
+        slot: AccountSlot,
+        credential: ClaudeCredential,
+        store: CredentialStore,
+        memoizedProviderSnapshot: AccountSnapshot?,
+        note: String? = nil
+    ) -> AccountSnapshot {
+        let local = store.cachedClaudeSnapshot(
+            for: slot,
+            identity: credential.identity,
+            note: note
+        ) ?? AccountSnapshot.unavailable(
+            slot,
+            identity: credential.identity.preferredDisplay,
+            plan: credential.plan,
+            detail: note ?? "no local quota snapshot available"
+        )
+
+        guard let memoizedProviderSnapshot else { return local }
+        let localIsCurrentEnough = local.canDisplayQuotaValues
+            && (local.refreshedAt ?? .distantPast)
+                >= (memoizedProviderSnapshot.refreshedAt ?? .distantPast)
+        guard !localIsCurrentEnough else { return local }
+
+        var reused = memoizedProviderSnapshot
+        reused.state = store.claudeSnapshotState(
+            fetchedAt: memoizedProviderSnapshot.refreshedAt
+        )
+        let age = memoizedProviderSnapshot.refreshedAt.map { agoText($0) } ?? "an unknown time"
+        reused.detail = "Provider's last confirmed reading · read \(age) ago"
+        return reused
+    }
+
+    /// A compact "3h 12m"-style age, matching the phrasing `CredentialStore`
+    /// uses for its own local-snapshot ages so a reused provider memo reads
+    /// the same way a fresh local reading would.
+    private nonisolated static func agoText(_ date: Date, now: Date = Date()) -> String {
+        let totalMinutes = max(0, Int(now.timeIntervalSince(date) / 60))
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        let minutes = totalMinutes % 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return "\(minutes)m"
     }
 
     /// Appends a diagnostic line when LIMIT_DASHBOARD_DEBUG=1. A temporary aid

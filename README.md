@@ -12,8 +12,9 @@
 Limit Dashboard is a local-only SwiftUI app that tracks, on one screen:
 
 - **Claude** (claude.ai / Claude Code) usage limits — the 5-hour, 7-day, and
-  model-scoped weekly windows — for up to three signed-in accounts, with live
-  reset countdowns and a 24-hour usage-history chart
+  model-scoped weekly windows — for as many signed-in accounts as you
+  configure (three by default), with live reset countdowns and a 24-hour
+  usage-history chart
 - **OpenAI Codex** (ChatGPT subscription) rate-limit windows, with its own
   7-day chart
 - **Google Vertex AI** token usage and estimated list-price spend across
@@ -115,20 +116,35 @@ latest real source observation, it removes those invalid rows.
 ```
 
 Requirements: macOS 14 or later and the Apple Swift/Xcode command-line tools.
-For live Claude quota, a Python interpreter with
+For live Claude quota — on by default — a Python interpreter with
 [`curl_cffi`](https://pypi.org/project/curl-cffi/) installed is also needed:
 point `LIMIT_DASHBOARD_CURL_CFFI_PYTHON` at it (`pip install curl_cffi` in any
 venv). Without it, Claude cards fall back to the local snapshot sources.
 
 ## Configuring accounts
 
-- **Claude** slots map to `~/.claude.json`, `~/.claude2/.claude.json`, and
-  `~/.claude3/.claude.json` — the default plus two `CLAUDE_CONFIG_DIR`
-  profiles. Slots with no signed-in profile simply report as unavailable.
+- **Accounts are configured, not hardcoded.** Claude and Codex slots come
+  from `~/.config/limit-dashboard/accounts.json` when it exists: a JSON array
+  of `{id, provider, label, configDirectory, email, enabled}`, where
+  `provider` is `"claude"` or `"codex"`, `configDirectory` is a Claude config
+  directory home-relative to your home folder (e.g. `".claude2"`), and
+  `email` and `enabled` are optional. The file is reloaded at the start of
+  every refresh, so adding, removing, or disabling an account takes effect
+  within one refresh interval — no relaunch needed. A missing file falls back
+  to the four built-in default slots below. Setting `"enabled": false` keeps
+  an entry in the file but takes it off the dashboard rather than deleting
+  it. An account's `id` also keys its chart history, so keeping an id stable
+  across edits preserves that account's history; changing it starts a new
+  series.
+- **Claude** slots default to `~/.claude.json`, `~/.claude2/.claude.json`,
+  and `~/.claude3/.claude.json` — the default plus two `CLAUDE_CONFIG_DIR`
+  profiles — when no `accounts.json` overrides them. Slots with no signed-in
+  profile simply report as unavailable.
 - **Vertex AI** accounts are read from
-  `~/.config/limit-dashboard/vertex_accounts.json` when it exists. Each entry
-  has an `id`, a display `label`, an optional home-relative `configDirectory`
-  (used as `CLOUDSDK_CONFIG`, `null` for the machine default), and an optional
+  `~/.config/limit-dashboard/vertex_accounts.json` when it exists, following
+  the same pattern in its own file. Each entry has an `id`, a display
+  `label`, an optional home-relative `configDirectory` (used as
+  `CLOUDSDK_CONFIG`, `null` for the machine default), and an optional
   `project` (`null` uses that config's active project):
 
   ```json
@@ -144,31 +160,59 @@ venv). Without it, Claude cards fall back to the local snapshot sources.
 
 ## Credential and network behavior
 
-- By default the app does not access the macOS Keychain. Only
-  `LIMIT_DASHBOARD_CLAUDE_API=1` changes that; see below. With the flag on it
-  still raises no authorization prompt, because it reads — and only ever
-  reads — through `/usr/bin/security` rather than as itself.
+- By default, each Claude account's quota is confirmed directly with that
+  account's own signed-in session, at most once every three minutes per
+  account: the usage endpoint is undocumented and aggressively rate-limited
+  outside Claude Code itself, and three minutes is the cadence community
+  usage monitors have found safe. Local sources — the status-line harvest and
+  the `.claude.json` cache below — fill the gaps between those confirmations.
+  This is the primary source, not an optional extra, because on a machine
+  signed into several Claude accounts at once, Claude Code's own status-line
+  data is shared, machine-global state (a confirmed upstream bug): a session
+  can render another account's numbers for a stretch even when a sample looks
+  fresh and is correctly stamped. A per-account OAuth token belongs to
+  exactly one account, so only that direct confirmation is certain. Set
+  `LIMIT_DASHBOARD_CLAUDE_API=0` to turn this off and go local-only instead:
+  no Keychain read and no Claude request. Reading the Keychain for the direct
+  query still raises no authorization prompt, because it reads — and only
+  ever reads — through `/usr/bin/security` rather than as itself.
 - Claude identities and fallback usage snapshots come from each local account
   state file: `~/.claude.json`, `~/.claude2/.claude.json`, and
   `~/.claude3/.claude.json`.
 - If the user's existing Claude Code status-line command has written a current
   snapshot under `/tmp/cc-rate-limits`, the app prefers its officially
-  supported `rate_limits.five_hour` and `rate_limits.seven_day` values. A file
-  is accepted only for the matching config slot and while its reset window is
-  still active. A sample harvested within five minutes is **Live**; one up to
-  an hour old is **Cached**. Older readings of a window that has not yet reset
-  are shown as **Aged**, labelled with their exact source age and a note that
-  usage may be higher — usage inside one reset window never decreases, so an
-  old observation is a true lower bound rather than a wrong number. Values are
-  withheld only when every window has reset, which the card reports as **Quota
-  window has reset**. Within the same reset window, an older/lower observation
-  can never reduce the selected Used percentage.
-- A later rewrite of `.claude.json` is not treated as an account change on its
-  own, because Claude rewrites that file constantly for unrelated reasons. The
-  app rejects a sample only when the retained registry backups actually show a
-  different account across the harvest instant. Those backups rotate, so an
-  observation older than the oldest retained backup cannot be proven either
-  way; it stays usable, and its age is stated on the card.
+  supported `rate_limits.five_hour` and `rate_limits.seven_day` values. Each
+  sample is a small JSON file the harvester stamps with `account_uuid` — the
+  signed-in account's uuid, read from that config directory's own
+  `.claude.json` registry at the moment the sample is written:
+
+  ```json
+  {
+    "acct": 2,
+    "five_hour_used": 13,
+    "seven_day_used": 84,
+    "five_hour_resets_at": 1785700800,
+    "seven_day_resets_at": 1785700800,
+    "ts": 1785690800,
+    "account_uuid": "b6e2c9a1-4f3d-4a2b-9c7e-2d5f8a1b3c4d"
+  }
+  ```
+
+  A sample is used only when that stamp matches the account currently signed
+  into the slot's config directory, checked fresh against the registry on
+  every read — not by scanning backups or trusting whole-file rewrite timing.
+  An empty or mismatched stamp makes the sample unusable regardless of how
+  fresh or plausible its numbers look; if a recent sample exists but its
+  stamp proves it names a different account, the card reports **Quota
+  unavailable** rather than showing borrowed numbers. A sample harvested
+  within five minutes is **Live**; one up to an hour old is **Cached**. Older
+  readings of a window that has not yet reset are shown as **Aged**,
+  labelled with their exact source age and a note that usage may be higher —
+  usage inside one reset window never decreases, so an old observation is a
+  true lower bound rather than a wrong number. Values are withheld only when
+  every window has reset, which the card reports as **Quota window has
+  reset**. Within the same reset window, an older/lower observation can never
+  reduce the selected Used percentage.
 - Full account email addresses come from each file's
   `oauthAccount.emailAddress`, with the configured label used only if that
   field is absent. Tokens and other credential fields are never shown.
@@ -177,9 +221,9 @@ venv). Without it, Claude cards fall back to the local snapshot sources.
   contains another account's cache, its card reports **Quota unavailable** and
   renders none of those borrowed values.
 - Codex credentials are read from `~/.codex/auth.json`.
-- With `LIMIT_DASHBOARD_CLAUDE_API=1`, every Claude card reads its account's
-  Claude Code credential from the login Keychain and queries
-  `https://claude.ai/api/oauth/usage`. The bundled helper reuses
+- By default, every Claude card reads its account's Claude Code credential
+  from the login Keychain and queries `https://claude.ai/api/oauth/usage`
+  directly, on the cadence described above. The bundled helper reuses
   harvester-web-mcp's `curl_cffi` Chrome transport because a normal URLSession
   request receives Cloudflare's `cf-mitigated: challenge` response. The token
   crosses the local process boundary only on stdin and is never placed in
@@ -187,16 +231,18 @@ venv). Without it, Claude cards fall back to the local snapshot sources.
 - The helper has a fixed `https://claude.ai` destination, follows redirects
   manually only within that origin, limits the response size, and returns the
   provider body to the existing parser. A failed transport, rejected session,
-  or changed response falls back to the identity-matched local status-line/cache
-  snapshot rather than blanking the card.
-- Without `LIMIT_DASHBOARD_CLAUDE_API=1`, Claude remains local-only: no Keychain
-  read and no Anthropic request.
+  a denied attempt under the three-minute cadence, or a changed response falls
+  back to the identity-matched local status-line/cache snapshot — or, if it is
+  still fresher than that, the last confirmed provider reading, honestly
+  re-aged — rather than blanking the card.
+- With `LIMIT_DASHBOARD_CLAUDE_API=0`, Claude remains local-only: no Keychain
+  read and no Claude request.
 - Access tokens are kept in memory only. The app has no token logging,
   analytics, crash uploader, cookies, or persistent response cache.
 - Requests go only to:
   - `https://chatgpt.com/backend-api/wham/usage` (Codex)
-  - `https://claude.ai/api/oauth/usage` (Claude) — **only** when
-    `LIMIT_DASHBOARD_CLAUDE_API=1`.
+  - `https://claude.ai/api/oauth/usage` (Claude) — **unless**
+    `LIMIT_DASHBOARD_CLAUDE_API=0`.
 - The app never asks for passwords and never exports or writes credentials.
   Session renewal belongs to Claude Code alone. Claude Code refuses to renew a
   credential that has already expired — a cold start answers "Not logged in"
@@ -227,9 +273,14 @@ venv). Without it, Claude cards fall back to the local snapshot sources.
   inside the items' access list, so reading through it asks nothing and
   modifies nothing.
 
-Claude cards query the provider at the selected interval when the feature flag
-is enabled. They also refresh their non-Keychain fallback view, so an update to
-a status-line snapshot or profile cache is picked up automatically. Claude Code
+Claude cards query the provider directly at most once every three minutes per
+account, independent of the selected refresh interval — a faster local poll
+reuses the most recent confirmed reading rather than requesting a new one.
+Between confirmations, a card keeps showing that last confirmed provider
+reading, honestly re-aged, in preference to a local snapshot that is not at
+least as current. Every refresh also re-reads the non-Keychain fallback view,
+so an update to a status-line snapshot or profile cache is picked up on the
+selected interval regardless of the provider's own cadence. Claude Code
 documents `rate_limits.*.used_percentage` as the consumed percentage from 0 to
 100 and `resets_at` as Unix epoch seconds:
 <https://code.claude.com/docs/en/statusline#rate-limit-usage>.
@@ -239,7 +290,11 @@ provider created new data. The footer therefore says **Checked**, source age is
 evaluated independently of polling time, and an aged Claude percentage is never
 presented as current — it is shown with its age instead. A window whose reset
 has passed is dropped rather than displayed, as is a cached window that carries
-no reset timestamp once its source file is no longer current.
+no reset timestamp once its source file is no longer current. An account with
+current data but no open 5-hour window shows a full 5-hour row — 100%
+remaining — rather than a missing one: Claude omits `resets_at` when that
+window is not currently open, and the absence means there is nothing spent
+yet, not that nothing was read.
 
 Each Claude card also shows **Fable usage**, the model-specific weekly limit,
 when the live response or fallback state-file cache contains this exact entry:
