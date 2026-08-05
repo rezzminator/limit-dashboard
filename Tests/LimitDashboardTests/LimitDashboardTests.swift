@@ -1874,4 +1874,223 @@ final class LimitDashboardTests: XCTestCase {
             "A success is re-read often enough to pick up a rotated token."
         )
     }
+
+    /// A `ClaudeCredential` whose values do not matter to the case being
+    /// tested — every `fallbackClaudeSnapshot` test below either takes the
+    /// provider-memo path (which ignores this argument entirely) or falls
+    /// through to a local registry built separately.
+    private func makeUninterestingClaudeCredential() -> ClaudeCredential {
+        ClaudeCredential(
+            accessToken: "token",
+            expiresAt: nil,
+            identity: LocalIdentity(email: nil, displayName: nil, organizationName: nil),
+            plan: "Max",
+            providerAccountID: nil
+        )
+    }
+
+    func testProviderMemoWithOpenWindowsWinsOverAFresherLocalStatuslineSample() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        // The local registry is deliberately fresher (60s old) than the
+        // provider memo (45 minutes old) and reports a different used
+        // percentage, so a pass that still preferred the local reading by
+        // freshness would be caught red-handed.
+        let (slot, configURL) = try makeIsolatedClaudeRegistry(
+            fetchedAt: now.addingTimeInterval(-60),
+            sevenDayResetAt: now.addingTimeInterval(24 * 60 * 60)
+        )
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let rateLimitsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "limit-dashboard-fallback-fresh-local-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: rateLimitsDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: rateLimitsDirectory) }
+
+        let store = CredentialStore(claudeRateLimitsDirectory: rateLimitsDirectory)
+        let memo = AccountSnapshot(
+            id: slot.id,
+            slot: slot,
+            identity: "provider@example.com",
+            plan: "Max",
+            state: .live,
+            windows: [
+                UsageWindow(
+                    id: "seven-day",
+                    title: "7-day",
+                    usedPercent: 57,
+                    resetAt: now.addingTimeInterval(24 * 60 * 60)
+                )
+            ],
+            fableUsage: UsageWindow(
+                id: "fable",
+                title: "Fable usage",
+                usedPercent: 24,
+                resetAt: now.addingTimeInterval(24 * 60 * 60)
+            ),
+            providerAccountID: "provider-account",
+            detail: "stale detail",
+            refreshedAt: now.addingTimeInterval(-45 * 60),
+            duplicatePeer: nil
+        )
+
+        let result = DashboardModel.fallbackClaudeSnapshot(
+            slot: slot,
+            credential: makeUninterestingClaudeCredential(),
+            store: store,
+            memoizedProviderSnapshot: memo,
+            now: now
+        )
+
+        XCTAssertEqual(
+            result.windows.map(\.usedPercent),
+            [57],
+            "The provider's own 57%-used reading must be shown even though a fresher (42%-used) local sample exists."
+        )
+        XCTAssertEqual(
+            result.state,
+            .cached,
+            "A 45-minute-old provider memo re-derives its own state from its own age."
+        )
+        XCTAssertEqual(result.detail, "Provider confirmed · read 45m ago")
+        XCTAssertNotNil(
+            result.fableUsage,
+            "The Fable row only ever comes from the provider payload and must survive onto the card."
+        )
+    }
+
+    func testProviderMemoWithEveryWindowResetFallsThroughToTheLocalPath() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let (slot, configURL) = try makeIsolatedClaudeRegistry(
+            fetchedAt: now.addingTimeInterval(-10 * 60),
+            sevenDayResetAt: now.addingTimeInterval(24 * 60 * 60)
+        )
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let rateLimitsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "limit-dashboard-fallback-expired-memo-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: rateLimitsDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: rateLimitsDirectory) }
+
+        let store = CredentialStore(claudeRateLimitsDirectory: rateLimitsDirectory)
+        let credential = makeUninterestingClaudeCredential()
+        let expiredMemo = AccountSnapshot(
+            id: slot.id,
+            slot: slot,
+            identity: "provider@example.com",
+            plan: "Max",
+            state: .cached,
+            windows: [
+                UsageWindow(
+                    id: "five-hour",
+                    title: "5-hour",
+                    usedPercent: 99,
+                    resetAt: now.addingTimeInterval(-60)
+                ),
+                UsageWindow(
+                    id: "seven-day",
+                    title: "7-day",
+                    usedPercent: 99,
+                    resetAt: now.addingTimeInterval(-1)
+                ),
+            ],
+            fableUsage: nil,
+            providerAccountID: "provider-account",
+            detail: "old provider detail",
+            refreshedAt: now.addingTimeInterval(-5 * 60),
+            duplicatePeer: nil
+        )
+
+        let result = DashboardModel.fallbackClaudeSnapshot(
+            slot: slot,
+            credential: credential,
+            store: store,
+            memoizedProviderSnapshot: expiredMemo,
+            now: now
+        )
+
+        let expectedLocal = try XCTUnwrap(
+            store.cachedClaudeSnapshot(
+                for: slot,
+                identity: credential.identity,
+                now: now
+            )
+        )
+        XCTAssertEqual(
+            result.windows,
+            expectedLocal.windows,
+            "With every memo window reset, the card must be built from the local path exactly as cachedClaudeSnapshot produces it."
+        )
+        XCTAssertEqual(
+            result.windows.map(\.id),
+            ["five-hour", "seven-day"],
+            "The local path's own synthesized five-hour row still applies once the provider path is not taken."
+        )
+        XCTAssertEqual(result.windows.map(\.usedPercent), [0, 42])
+    }
+
+    func testProviderMemoPruneKeepsOnlyTheOpenSevenDayWindowWithoutSynthesizingAFiveHourRow() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let store = CredentialStore()
+        let slot = try XCTUnwrap(
+            AccountSlot.defaultSlots.first { $0.provider == .claude }
+        )
+
+        let memo = AccountSnapshot(
+            id: slot.id,
+            slot: slot,
+            identity: "provider@example.com",
+            plan: "Max",
+            state: .live,
+            windows: [
+                UsageWindow(
+                    id: "five-hour",
+                    title: "5-hour",
+                    usedPercent: 12,
+                    resetAt: now.addingTimeInterval(-30)
+                ),
+                UsageWindow(
+                    id: "seven-day",
+                    title: "7-day",
+                    usedPercent: 57,
+                    resetAt: now.addingTimeInterval(24 * 60 * 60)
+                ),
+            ],
+            fableUsage: nil,
+            providerAccountID: "provider-account",
+            detail: "old detail",
+            refreshedAt: now.addingTimeInterval(-2 * 60),
+            duplicatePeer: nil
+        )
+
+        let result = DashboardModel.fallbackClaudeSnapshot(
+            slot: slot,
+            credential: makeUninterestingClaudeCredential(),
+            store: store,
+            memoizedProviderSnapshot: memo,
+            now: now
+        )
+
+        XCTAssertEqual(
+            result.windows.map(\.id),
+            ["seven-day"],
+            "The expired five-hour window is dropped, and the provider path must not synthesize one in its place — that synthesis belongs only to the local path, which has grounds to assume an untouched window."
+        )
+        XCTAssertEqual(result.windows.first?.usedPercent, 57)
+        XCTAssertEqual(
+            result.state,
+            .live,
+            "A 2-minute-old provider memo re-derives its own state from its own age."
+        )
+        XCTAssertEqual(result.detail, "Provider confirmed · read 2m ago")
+    }
 }

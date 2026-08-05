@@ -32,10 +32,17 @@ final class DashboardModel: ObservableObject {
     /// effect without restarting the app.
     private(set) var slots: [AccountSlot] = DashboardModel.initialSlots
 
-    /// The provider's own last-confirmed reading for a Claude slot. Kept so a
-    /// card can still show it — honestly re-aged, never as live — when a
-    /// later cycle's query is throttled or fails outright rather than
-    /// reverting straight to the local snapshot.
+    /// The provider's own last-confirmed reading for a Claude slot. Between
+    /// polls this is the display source of truth for the account — preferred
+    /// over the local snapshot outright, not merely when it happens to be
+    /// newer. A uuid-correct local statusline sample can still describe an
+    /// idle session's frozen numbers, and only the provider payload ever
+    /// carries the Fable weekly limit, so favoring the local reading by
+    /// freshness alone showed stale numbers and dropped the Fable row. Kept
+    /// so a card can still show it — honestly re-aged, never as live — when
+    /// a later cycle's query is throttled or fails outright rather than
+    /// reverting straight to the local snapshot. See `fallbackClaudeSnapshot`
+    /// for the exact policy.
     private var providerSnapshotMemo: [String: AccountSnapshot] = [:]
 
     private var codexSlotID: String? {
@@ -435,45 +442,86 @@ final class DashboardModel: ObservableObject {
         }
     }
 
-    /// Builds a Claude card from local sources for a cycle in which the
-    /// provider was not queried — the request throttle denied the attempt or
-    /// the request itself failed. When an earlier cycle's provider reading is
-    /// newer than what the local sources produced, or the local sources
-    /// produced nothing displayable at all, that reading is shown again with
-    /// its state re-derived from its own age — so a memo that is getting old
-    /// honestly turns `.cached` or `.stale` rather than continuing to read as
-    /// live.
-    private nonisolated static func fallbackClaudeSnapshot(
+    /// Builds a Claude card for a cycle in which the provider was not
+    /// queried — the request throttle denied the attempt or the request
+    /// itself failed.
+    ///
+    /// The provider's own last-confirmed reading is preferred outright over
+    /// the local snapshot, not merely when it happens to be newer: a
+    /// uuid-correct local statusline sample can still describe an idle
+    /// session's frozen numbers, while the provider reading reflects real
+    /// usage as of its own last poll — and only the provider payload ever
+    /// carries the Fable weekly limit, so preferring the local snapshot by
+    /// freshness both showed wrong numbers and blanked the Fable row. So
+    /// when a usable provider memo exists it is returned with its windows
+    /// pruned to those still open and its state re-derived from its own
+    /// age — so a memo that is getting old honestly turns `.cached` or
+    /// `.stale` rather than continuing to read as live. Only when there is
+    /// no memo, or every one of its windows has since reset, does this fall
+    /// through to the local snapshot (`cachedClaudeSnapshot`), unchanged —
+    /// including its synthesized five-hour row and the `note` plumbing.
+    ///
+    /// Internal rather than private so tests can exercise the policy
+    /// directly, matching how `cachedClaudeSnapshot` is already exposed.
+    nonisolated static func fallbackClaudeSnapshot(
         slot: AccountSlot,
         credential: ClaudeCredential,
         store: CredentialStore,
         memoizedProviderSnapshot: AccountSnapshot?,
-        note: String? = nil
+        note: String? = nil,
+        now: Date = Date()
     ) -> AccountSnapshot {
-        let local = store.cachedClaudeSnapshot(
+        if let memoizedProviderSnapshot,
+            let confirmed = prunedProviderSnapshot(
+                memoizedProviderSnapshot,
+                store: store,
+                now: now
+            )
+        {
+            return confirmed
+        }
+
+        return store.cachedClaudeSnapshot(
             for: slot,
             identity: credential.identity,
-            note: note
+            note: note,
+            now: now
         ) ?? AccountSnapshot.unavailable(
             slot,
             identity: credential.identity.preferredDisplay,
             plan: credential.plan,
             detail: note ?? "no local quota snapshot available"
         )
+    }
 
-        guard let memoizedProviderSnapshot else { return local }
-        let localIsCurrentEnough = local.canDisplayQuotaValues
-            && (local.refreshedAt ?? .distantPast)
-                >= (memoizedProviderSnapshot.refreshedAt ?? .distantPast)
-        guard !localIsCurrentEnough else { return local }
+    /// Prunes a provider memo down to the windows still open as of `now`,
+    /// clearing `fableUsage` too once its own reset has passed. Returns `nil`
+    /// when nothing survives, so the caller falls through to the local
+    /// snapshot instead of displaying an empty card. `refreshedAt` is left
+    /// untouched so the reused reading's age stays honest.
+    private nonisolated static func prunedProviderSnapshot(
+        _ snapshot: AccountSnapshot,
+        store: CredentialStore,
+        now: Date
+    ) -> AccountSnapshot? {
+        var pruned = snapshot
+        pruned.windows = snapshot.windows.filter { window in
+            guard let resetAt = window.resetAt else { return true }
+            return resetAt > now
+        }
+        guard !pruned.windows.isEmpty else { return nil }
 
-        var reused = memoizedProviderSnapshot
-        reused.state = store.claudeSnapshotState(
-            fetchedAt: memoizedProviderSnapshot.refreshedAt
+        if let fableResetAt = pruned.fableUsage?.resetAt, fableResetAt <= now {
+            pruned.fableUsage = nil
+        }
+
+        pruned.state = store.claudeSnapshotState(
+            fetchedAt: pruned.refreshedAt,
+            now: now
         )
-        let age = memoizedProviderSnapshot.refreshedAt.map { agoText($0) } ?? "an unknown time"
-        reused.detail = "Provider's last confirmed reading · read \(age) ago"
-        return reused
+        let age = pruned.refreshedAt.map { agoText($0, now: now) } ?? "an unknown time"
+        pruned.detail = "Provider confirmed · read \(age) ago"
+        return pruned
     }
 
     /// A compact "3h 12m"-style age, matching the phrasing `CredentialStore`
