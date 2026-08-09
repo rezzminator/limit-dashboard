@@ -2093,4 +2093,154 @@ final class LimitDashboardTests: XCTestCase {
         )
         XCTAssertEqual(result.detail, "Provider confirmed · read 2m ago")
     }
+
+    /// A directory is where a session was stored, not who it belongs to. The
+    /// same account is routinely signed in under several config directories at
+    /// once, and Claude Code renews only the copy it is using — so the slot's
+    /// own directory can hold a cleared or expired item while a live session
+    /// for the identical account sits one directory over. Finding it is a
+    /// lookup by registry uuid, never by directory name or position.
+    func testSessionsForTheSameAccountAreFoundInOtherConfigDirectoriesNewestFirst() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-home-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: home,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        func writeRegistry(
+            _ relativePath: String,
+            accountUuid: String?,
+            modifiedAt: Date
+        ) throws {
+            let url = home.appendingPathComponent(relativePath)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let account = accountUuid.map {
+                #"{"oauthAccount":{"accountUuid":"\#($0)"}}"#
+            } ?? "{}"
+            try Data(account.utf8).write(to: url)
+            try FileManager.default.setAttributes(
+                [.modificationDate: modifiedAt],
+                ofItemAtPath: url.path
+            )
+        }
+
+        // The slot's own directory: signed in, but its session was cleared.
+        try writeRegistry(
+            ".claude2/.claude.json",
+            accountUuid: "uuid-two",
+            modifiedAt: now.addingTimeInterval(-60)
+        )
+        // Same account, one level down under a fleet runner's parent — the
+        // newest registry, so the likeliest to hold a live session.
+        try writeRegistry(
+            ".cc/2/.claude.json",
+            accountUuid: "uuid-two",
+            modifiedAt: now.addingTimeInterval(-30)
+        )
+        // Same account again, but older.
+        try writeRegistry(
+            ".claude2-spare/.claude.json",
+            accountUuid: "uuid-two",
+            modifiedAt: now.addingTimeInterval(-600)
+        )
+        // A different account must never be borrowed from.
+        try writeRegistry(
+            ".claude/.claude.json",
+            accountUuid: "uuid-one",
+            modifiedAt: now.addingTimeInterval(-10)
+        )
+        // Archived directories keep this account's uuid but cannot hold a live
+        // token — a home can hold hundreds, and reading them all would mean
+        // hundreds of Keychain lookups per refresh.
+        try writeRegistry(
+            ".claude-sessions/s20260611-155450/.claude.json",
+            accountUuid: "uuid-two",
+            modifiedAt: now.addingTimeInterval(-40 * 60 * 60)
+        )
+        // Visible directories are the user's own documents, and reading those
+        // is what raises macOS privacy prompts.
+        try writeRegistry(
+            "Documents/.claude.json",
+            accountUuid: "uuid-two",
+            modifiedAt: now
+        )
+
+        let store = CredentialStore(homeDirectory: home)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
+        )
+
+        XCTAssertEqual(
+            store.peerClaudeConfigDirectories(for: accountTwo, now: now),
+            [
+                home.appendingPathComponent(".cc/2").path,
+                home.appendingPathComponent(".claude2-spare").path,
+            ],
+            "Only directories whose registry names the same account are offered, newest first; the account's own directory, another account's, a stale one, and a visible one are all excluded."
+        )
+
+        // Slot one's registry lives at the home root beside its directory
+        // rather than inside it, and that special case has to survive the walk.
+        let accountOne = try XCTUnwrap(
+            AccountSlot.defaultSlots.first { $0.id == "claude-1" }
+        )
+        try writeRegistry(
+            ".claude.json",
+            accountUuid: "uuid-one",
+            modifiedAt: now.addingTimeInterval(-90)
+        )
+        XCTAssertEqual(
+            store.peerClaudeConfigDirectories(for: accountOne, now: now),
+            [],
+            "Account one is signed in only under its own directory, so nothing may be borrowed for it."
+        )
+        XCTAssertTrue(
+            store.recentClaudeConfigDirectories(now: now).contains {
+                $0.directory == home.appendingPathComponent(".claude").path
+                    && $0.statePath == home.appendingPathComponent(".claude.json").path
+            },
+            "The default directory is read through the registry Claude Code keeps beside it at the home root."
+        )
+    }
+
+    func testAnAccountWithNoRegistryIdentityBorrowsNothing() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "limit-dashboard-home-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        for path in [".claude2/.claude.json", ".cc/2/.claude.json"] {
+            let url = home.appendingPathComponent(path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            // Signed out here: Claude Code removes the account block entirely.
+            try Data("{}".utf8).write(to: url)
+            try FileManager.default.setAttributes(
+                [.modificationDate: now],
+                ofItemAtPath: url.path
+            )
+        }
+
+        let store = CredentialStore(homeDirectory: home)
+        let accountTwo = try XCTUnwrap(
+            AccountSlot.defaultSlots.first { $0.id == "claude-2" }
+        )
+        XCTAssertEqual(
+            store.peerClaudeConfigDirectories(for: accountTwo, now: now),
+            [],
+            "With no uuid to match on there is no proof of identity, and an unproven match is exactly the slot-position guess this app removed."
+        )
+    }
 }
