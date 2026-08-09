@@ -1,6 +1,39 @@
 # Limit Dashboard status
 
-Snapshot verified on 2026-07-31 (Europe/Amsterdam).
+Snapshot verified on 2026-08-09 (Europe/Amsterdam).
+
+## Sessions are found by account, not by directory — 2026-08-09
+
+Account 2 lost its provider reading — no Fable row, numbers falling back to the
+status line — while the account itself was working normally in several running
+sessions. Its Keychain item under `~/.claude2` held an empty access token and an
+expiry of 0: Claude Code had cleared the stored session while keeping the
+account signed in, and the app read that one item and concluded there was
+nothing to query with.
+
+The same account was signed in under a second config directory at the time,
+with a session valid for another three hours. Nothing was wrong with the
+account, the token, or the network — only with the assumption that an account's
+session lives at one path. That is the same assumption, one layer down, that
+slot-number attribution was removed for: a directory records where a session was
+put, not whose it is.
+
+A slot's own directory is still tried first, and its Keychain item is re-read
+once with the memo dropped in case Claude Code renewed underneath it. Only then
+does the app look for the account elsewhere — hidden directories up to two
+levels under the home whose `.claude.json` was written within 12 hours, newest
+first, at most six opened, and only ones whose registry records the same
+`oauthAccount.accountUuid`. The match is proof of identity, not a heuristic:
+an account with no uuid recorded borrows nothing, and a directory holding a
+different account is never read. Visible folders are skipped entirely, so no
+macOS privacy prompt is raised, and the freshness bound keeps a home holding
+~180 archived session directories from becoming ~180 Keychain lookups a
+refresh. Renewal follows the credential: whichever directory the session was
+read from is the one Claude Code is asked to renew.
+
+A cleared item is now also reported as its own state — `signed-in session was
+cleared here · open this account once` — rather than as the same "no stored
+session" message an account that was never set up would produce.
 
 ## Freshness and suppression audit — 2026-07-31
 

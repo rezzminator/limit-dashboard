@@ -179,6 +179,20 @@ venv). Without it, Claude cards fall back to the local snapshot sources.
 - Claude identities and fallback usage snapshots come from each local account
   state file: `~/.claude.json`, `~/.claude2/.claude.json`, and
   `~/.claude3/.claude.json`.
+- A session is looked up by account, not by directory. A config directory is
+  only where a session was stored: the same account is routinely signed in
+  under more than one of them at once (a second tree, a fleet runner, a swap
+  tool), and Claude Code renews only the copy it is using — so the directory a
+  card points at can hold an expired item, or one whose token has been cleared
+  outright, while an equally valid session for the identical account is live
+  one directory over. When a slot's own directory holds nothing usable, the app
+  looks for that account elsewhere: hidden directories up to two levels under
+  the home whose `.claude.json` was written in the last 12 hours, newest first,
+  at most six opened, and only ones whose registry records the *same*
+  `oauthAccount.accountUuid`. An account with no uuid to match on borrows
+  nothing. Visible folders are never read, so no macOS privacy prompt is
+  raised, and the freshness bound is what keeps a home full of archived session
+  directories from becoming hundreds of Keychain lookups per refresh.
 - If the user's existing Claude Code status-line command has written a current
   snapshot under `/tmp/cc-rate-limits`, the app prefers its officially
   supported `rate_limits.five_hour` and `rate_limits.seven_day` values. Each

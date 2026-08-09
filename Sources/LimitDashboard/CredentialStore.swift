@@ -64,15 +64,28 @@ struct CredentialStore: Sendable {
     /// attempting the exchange. The only reliable moment to renew is therefore
     /// shortly *before* expiry, while the stored session is still accepted.
     static let proactiveRenewalMargin: TimeInterval = 15 * 60
+    /// How recently a config directory must have been written for a live
+    /// session to plausibly still be stored against it. Claude Code rewrites
+    /// the registry of every directory it is actually using continuously, and
+    /// an access token lives hours, so a registry untouched for longer than
+    /// this holds nothing worth reading. This is what keeps a home full of
+    /// archived session directories from turning one lookup into hundreds of
+    /// Keychain reads.
+    static let peerDirectoryFreshness: TimeInterval = 12 * 60 * 60
+    /// The most directories opened while looking for one account's session.
+    static let peerDirectoryReadLimit = 6
     private let claudeRateLimitsDirectory: URL
+    private let homeDirectory: URL
 
     init(
         claudeRateLimitsDirectory: URL = URL(
             fileURLWithPath: "/tmp/cc-rate-limits",
             isDirectory: true
-        )
+        ),
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) {
         self.claudeRateLimitsDirectory = claudeRateLimitsDirectory
+        self.homeDirectory = homeDirectory
     }
 
     func load(_ slot: AccountSlot) -> LoadedCredential {
@@ -299,55 +312,76 @@ struct CredentialStore: Sendable {
                 "This signed-in account has no local quota snapshot yet."
             )
         }
-        guard let credential = claudeKeychainCredential(for: slot, identity: identity) else {
+        guard let ownDirectory = claudeConfigDirectory(for: slot) else {
             return .failed(
                 slot,
                 identity,
                 "no stored session to query the provider with"
             )
         }
-        if credential.isUsable(now: now) {
-            // Renew while renewal is still possible: once this token expires,
-            // no cold-started helper can bring it back, and the dashboard is
-            // left waiting for the user to open the account by hand.
-            if
-                let expiresAt = credential.expiresAt,
-                expiresAt.timeIntervalSince(now) < Self.proactiveRenewalMargin,
-                renewClaudeSession(for: slot, currentExpiry: expiresAt),
-                let renewed = claudeKeychainCredential(for: slot, identity: identity),
-                renewed.isUsable(now: now)
-            {
-                return .claude(slot, renewed)
-            }
-            return .claude(slot, credential)
+
+        var stored = readClaudeCredential(
+            configDirectory: ownDirectory,
+            slot: slot,
+            identity: identity
+        )
+        if let credential = stored.credential, credential.isUsable(now: now) {
+            return .claude(
+                slot,
+                renewedIfNearExpiry(
+                    credential,
+                    configDirectory: ownDirectory,
+                    slot: slot,
+                    identity: identity,
+                    now: now
+                )
+            )
         }
 
         // The reading may simply be the memoised copy from before Claude Code
         // renewed — using this account renews it, and that write is invisible
         // until the remembered copy is dropped. Re-read once against the
         // Keychain before concluding anything is wrong.
-        if let configDirectory = claudeConfigDirectory(for: slot) {
-            KeychainCache.shared.invalidate(
-                Self.claudeKeychainService(forConfigDirectory: configDirectory)
-            )
-            if
-                let current = claudeKeychainCredential(for: slot, identity: identity),
-                current.isUsable(now: now)
-            {
-                return .claude(slot, current)
-            }
+        KeychainCache.shared.invalidate(
+            Self.claudeKeychainService(forConfigDirectory: ownDirectory)
+        )
+        stored = readClaudeCredential(
+            configDirectory: ownDirectory,
+            slot: slot,
+            identity: identity
+        )
+        if let credential = stored.credential, credential.isUsable(now: now) {
+            return .claude(slot, credential)
         }
 
-        // The token has expired. Claude Code is asked anyway — today's CLI
-        // refuses this case, but the attempt is free and a future version may
-        // handle it — and letting the tool that owns the credential renew it
-        // keeps this app out of the write path entirely.
-        if
-            renewClaudeSession(for: slot, currentExpiry: credential.expiresAt),
-            let renewed = claudeKeychainCredential(for: slot, identity: identity),
-            renewed.isUsable(now: now)
-        {
-            return .claude(slot, renewed)
+        // Nothing usable is filed under this account's own directory — but a
+        // directory is only where a session was stored, not who it belongs to.
+        // The same account is routinely signed in under more than one config
+        // directory at once (a second tree, a fleet runner, a swap tool), and
+        // Claude Code renews only the copy it is using: the one this slot
+        // points at can sit expired, or be cleared outright, while an equally
+        // valid session for the very same account is live one directory over.
+        // Reading that one is not a guess — the account is matched by the
+        // registry uuid both directories record, so the numbers that come back
+        // are this account's by construction.
+        for peerDirectory in peerClaudeConfigDirectories(for: slot, now: now) {
+            let peer = readClaudeCredential(
+                configDirectory: peerDirectory,
+                slot: slot,
+                identity: identity
+            )
+            if let credential = peer.credential, credential.isUsable(now: now) {
+                return .claude(
+                    slot,
+                    renewedIfNearExpiry(
+                        credential,
+                        configDirectory: peerDirectory,
+                        slot: slot,
+                        identity: identity,
+                        now: now
+                    )
+                )
+            }
         }
 
         // This app does not exchange the refresh token.
@@ -359,6 +393,32 @@ struct CredentialStore: Sendable {
         // any process that read the credential in between — and Claude Code
         // keeps long-lived sessions in memory. Writing credentials at all is
         // therefore left to the tool that owns them.
+        guard let credential = stored.credential else {
+            let reason = stored.isCleared
+                ? "signed-in session was cleared here · open this account once"
+                : "no stored session to query the provider with"
+            return .failed(slot, identity, reason)
+        }
+
+        // The token has expired. Claude Code is asked anyway — today's CLI
+        // refuses this case, but the attempt is free and a future version may
+        // handle it — and letting the tool that owns the credential renew it
+        // keeps this app out of the write path entirely.
+        if
+            renewClaudeSession(
+                configDirectory: ownDirectory,
+                currentExpiry: credential.expiresAt
+            ),
+            let renewed = readClaudeCredential(
+                configDirectory: ownDirectory,
+                slot: slot,
+                identity: identity
+            ).credential,
+            renewed.isUsable(now: now)
+        {
+            return .claude(slot, renewed)
+        }
+
         let expiredFor = credential.expiresAt.map {
             " \(snapshotAge($0, now: now)) ago"
         } ?? ""
@@ -367,6 +427,37 @@ struct CredentialStore: Sendable {
             identity,
             "signed-in session expired\(expiredFor) and could not be renewed · open this account once"
         )
+    }
+
+    /// Renews a session that is about to expire, while renewal is still
+    /// possible: once a token expires no cold-started helper can bring it
+    /// back, and the account is left waiting for the user to open it by hand.
+    /// The directory renewed is the one the token was read from, which is not
+    /// always the slot's own.
+    private func renewedIfNearExpiry(
+        _ credential: ClaudeCredential,
+        configDirectory: String,
+        slot: AccountSlot,
+        identity: LocalIdentity,
+        now: Date
+    ) -> ClaudeCredential {
+        guard
+            let expiresAt = credential.expiresAt,
+            expiresAt.timeIntervalSince(now) < Self.proactiveRenewalMargin,
+            renewClaudeSession(
+                configDirectory: configDirectory,
+                currentExpiry: expiresAt
+            ),
+            let renewed = readClaudeCredential(
+                configDirectory: configDirectory,
+                slot: slot,
+                identity: identity
+            ).credential,
+            renewed.isUsable(now: now)
+        else {
+            return credential
+        }
+        return renewed
     }
 
     /// Asks Claude Code to renew the session for one config directory.
@@ -379,11 +470,10 @@ struct CredentialStore: Sendable {
     /// entirely Claude Code's decision, so a token that does not need renewing
     /// is left untouched. Both stages together are one throttled attempt.
     private func renewClaudeSession(
-        for slot: AccountSlot,
+        configDirectory: String,
         currentExpiry: Date?
     ) -> Bool {
         guard
-            let configDirectory = claudeConfigDirectory(for: slot),
             SessionRenewalThrottle.shared.beginAttempt(for: configDirectory),
             let binary = Self.claudeBinaryURL()
         else {
@@ -536,17 +626,38 @@ struct CredentialStore: Sendable {
 
     func claudeConfigDirectory(for slot: AccountSlot) -> String? {
         guard let configDirectory = slot.configDirectory else { return nil }
-        return FileManager.default.homeDirectoryForCurrentUser
+        return homeDirectory
             .appendingPathComponent(configDirectory, isDirectory: true)
             .path
     }
 
-    private func claudeKeychainCredential(
-        for slot: AccountSlot,
+    /// What one config directory's Keychain item holds. An item whose access
+    /// token is an empty string is not the same thing as a missing one: Claude
+    /// Code writes that when it drops a session while keeping the account
+    /// signed in, and it is the difference between "this account was never set
+    /// up here" and "its session needs opening once".
+    private enum StoredClaudeCredential {
+        case missing
+        case cleared
+        case stored(ClaudeCredential)
+
+        var credential: ClaudeCredential? {
+            if case .stored(let credential) = self { return credential }
+            return nil
+        }
+
+        var isCleared: Bool {
+            if case .cleared = self { return true }
+            return false
+        }
+    }
+
+    private func readClaudeCredential(
+        configDirectory: String,
+        slot: AccountSlot,
         identity: LocalIdentity
-    ) -> ClaudeCredential? {
+    ) -> StoredClaudeCredential {
         guard
-            let configDirectory = claudeConfigDirectory(for: slot),
             let secret = keychainSecret(
                 service: Self.claudeKeychainService(
                     forConfigDirectory: configDirectory
@@ -555,22 +666,28 @@ struct CredentialStore: Sendable {
             let root = try? JSONSerialization.jsonObject(with: secret)
                 as? [String: Any],
             let oauth = root["claudeAiOauth"] as? [String: Any],
-            let accessToken = oauth["accessToken"] as? String,
-            !accessToken.isEmpty
+            let accessToken = oauth["accessToken"] as? String
         else {
-            return nil
+            return .missing
         }
+        guard !accessToken.isEmpty else { return .cleared }
 
         let expiresAt = (oauth["expiresAt"] as? Double)
             .map { Date(timeIntervalSince1970: $0 / 1_000) }
+        // Identity and plan always come from the slot's own registry, never
+        // from the directory the token happened to be read out of: the token
+        // decides whose numbers come back, and the slot decides whose card
+        // they are drawn on. Both name the same account by construction.
         let account = claudeAccount(for: slot)
-        return ClaudeCredential(
-            accessToken: accessToken,
-            expiresAt: expiresAt,
-            identity: identity,
-            plan: claudePlan(from: account),
-            providerAccountID: account?["accountUuid"] as? String,
-            refreshToken: oauth["refreshToken"] as? String
+        return .stored(
+            ClaudeCredential(
+                accessToken: accessToken,
+                expiresAt: expiresAt,
+                identity: identity,
+                plan: claudePlan(from: account),
+                providerAccountID: account?["accountUuid"] as? String,
+                refreshToken: oauth["refreshToken"] as? String
+            )
         )
     }
 
@@ -701,8 +818,117 @@ struct CredentialStore: Sendable {
 
     func claudeStateURL(for slot: AccountSlot) -> URL? {
         guard let relativePath = slot.claudeStatePath else { return nil }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(relativePath)
+        return homeDirectory.appendingPathComponent(relativePath)
+    }
+
+    /// The account uuid a config directory's registry records, if any. This is
+    /// the only durable name an account has locally: emails repeat across
+    /// organisations and directory names are just where a session was put.
+    func claudeRegistryAccountID(atPath path: String) -> String? {
+        guard
+            let data = try? Data(
+                contentsOf: URL(fileURLWithPath: path),
+                options: [.mappedIfSafe]
+            ),
+            let root = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+            let account = root["oauthAccount"] as? [String: Any],
+            let accountID = account["accountUuid"] as? String,
+            !accountID.isEmpty
+        else {
+            return nil
+        }
+        return accountID
+    }
+
+    /// Config directories under the home whose registry Claude Code has
+    /// written recently enough to still hold a live session, newest first.
+    ///
+    /// Only hidden directories are walked. Everything Claude Code creates is
+    /// hidden, and the visible entries in a home are the user's own documents —
+    /// the folders macOS raises a privacy prompt for, which this app must never
+    /// provoke. Two levels are covered because tools that run a fleet of
+    /// accounts give each one a directory under a single parent.
+    func recentClaudeConfigDirectories(
+        now: Date = Date()
+    ) -> [(directory: String, statePath: String)] {
+        let fileManager = FileManager.default
+        let homePath = homeDirectory.path
+        let defaultDirectory = homeDirectory
+            .appendingPathComponent(".claude", isDirectory: true)
+            .path
+
+        func directories(in path: String) -> [String] {
+            let names = (try? fileManager.contentsOfDirectory(atPath: path)) ?? []
+            return names.compactMap { name in
+                let child = (path as NSString).appendingPathComponent(name)
+                var isDirectory: ObjCBool = false
+                guard
+                    fileManager.fileExists(atPath: child, isDirectory: &isDirectory),
+                    isDirectory.boolValue
+                else {
+                    return nil
+                }
+                return child
+            }
+        }
+
+        var candidates: [String] = []
+        for parent in directories(in: homePath) {
+            let name = (parent as NSString).lastPathComponent
+            guard name.hasPrefix("."), name != ".Trash" else { continue }
+            candidates.append(parent)
+            candidates.append(contentsOf: directories(in: parent))
+        }
+
+        let oldest = now.addingTimeInterval(-Self.peerDirectoryFreshness)
+        return candidates.compactMap { directory -> (String, String, Date)? in
+            // The default directory keeps its registry beside itself at the
+            // home root rather than inside itself.
+            let statePath = directory == defaultDirectory
+                ? homeDirectory.appendingPathComponent(".claude.json").path
+                : (directory as NSString).appendingPathComponent(".claude.json")
+            guard
+                let attributes = try? fileManager
+                    .attributesOfItem(atPath: statePath),
+                let modifiedAt = attributes[.modificationDate] as? Date,
+                modifiedAt > oldest
+            else {
+                return nil
+            }
+            return (directory, statePath, modifiedAt)
+        }
+        .sorted { $0.2 > $1.2 }
+        .map { (directory: $0.0, statePath: $0.1) }
+    }
+
+    /// Directories other than the slot's own that hold the same signed-in
+    /// account, newest first and capped: a session for this account may be
+    /// stored in any of them, and the freshest is the likeliest to be live.
+    func peerClaudeConfigDirectories(
+        for slot: AccountSlot,
+        now: Date = Date()
+    ) -> [String] {
+        guard
+            let ownDirectory = claudeConfigDirectory(for: slot),
+            let ownStatePath = claudeStateURL(for: slot)?.path,
+            let accountID = claudeRegistryAccountID(atPath: ownStatePath)
+        else {
+            return []
+        }
+
+        var peers: [String] = []
+        for candidate in recentClaudeConfigDirectories(now: now)
+        where candidate.directory != ownDirectory {
+            guard
+                claudeRegistryAccountID(atPath: candidate.statePath) == accountID
+            else {
+                continue
+            }
+            peers.append(candidate.directory)
+            if peers.count == Self.peerDirectoryReadLimit { break }
+        }
+        return peers
     }
 
     func cacheMatchesClaudeIdentity(
