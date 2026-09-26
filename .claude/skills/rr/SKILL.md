@@ -1,7 +1,7 @@
 ---
 name: rr
 version: '1.2.1'
-repo: 'https://github.com/mreza0100/rr'
+repo: 'https://github.com/rezzminator/rr'
 description: Reza's Research-and-Report protocol. Research can target the **internet, the local codebase, or both** — RR detects this from the topic and tells the agents which sources to use. Two modes — RR (run a Workflow pipeline — scout → fan-out → adversarial verify → synthesize — and deliver its report) and RRP (write a self-contained prompt for the user to run in another chat). Triggered when the user says "RR", "research and report", "RRP", "RR-prompt", "research <topic>", "look into <topic>", or "find out <topic>". Use this skill INSTEAD of jumping straight to web search OR straight to grep — RR is a structured Workflow pipeline, not a single query.
 ---
 
